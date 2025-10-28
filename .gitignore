@@ -1,0 +1,35 @@
+# 🐍 Python cache
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+*.pdb
+
+# 🔒 Virtual environment
+.venv/
+env/
+venv/
+
+# 🧾 Logs and temp data
+app/logs/
+*.log
+*.csv
+
+# 📦 Build artifacts
+build/
+dist/
+*.egg-info/
+
+# 🪟 OS-specific
+.DS_Store
+Thumbs.db
+
+# 🧰 IDE settings
+.vscode/
+.idea/
+
+# 🚫 Test or debug files
+*.bak
+*.tmp
+*.swp
+*.swo
