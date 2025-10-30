@@ -2,30 +2,24 @@
 import os
 import platform
 import argparse
-from scanner import scan_usb
+import psutil
 from pathlib import Path
+from scanner import scan_usb
+from watcher import start_monitoring
 
 
-def get_usb_path():
-    """Mount point detection of USB stick via this script."""
-    current_path = os.path.abspath(__file__)
-    if platform.system() == "Windows":
-        drive = os.path.splitdrive(current_path)[0] + "\\"
-        return drive
-    else:
-        parts = current_path.split(os.sep)
-        for i in range(len(parts), 0, -1):
-            path = os.sep.join(parts[:i])
-            if os.path.ismount(path):
-                return path
-        return "/"
-    
-if __name__ == "__main__":
-    usb_path = get_usb_path()
-    print(f"USB Path Detected: {usb_path}")
+def find_usb_mount():
+    username = os.getlogin()
+    possible_paths = [f"/run/media/{username}", f"/media/{username}"]
 
-    log_path = os.path.join(os.path.dirname(__file__), "logs")
-    scan_usb(usb_path, log_path)
+    for path in possible_paths:
+        if os.path.exists(path):
+            for device in os.listdir(path):
+                mount_path = os.path.join(path, device)
+                if os.path.ismount(mount_path):
+                    return mount_path
+    return None
+
 
 def get_mount_root_of_path(p: Path) -> Path:
     p = p.resolve()
@@ -47,34 +41,30 @@ def get_mount_root_of_path(p: Path) -> Path:
             cur = parent
             prev_dev = parent_dev
 
+
 def detect_usb_root_from_script() -> str:
-    # if run from a source tree, __file__ will be in that tree; if run from USB, this resolves to USB path.
     running_file = Path(__file__).resolve()
     mount_root = get_mount_root_of_path(running_file)
     return str(mount_root)
 
+
 def parse_args():
     p = argparse.ArgumentParser(description="USB Threat Behavior Logger")
-    p.add_argument("--path", "-p", help="(DEV) Path to operate on. If omitted, app uses the mount of this script.", default=None)
-    p.add_argument("--require-removable", action="store_true", help="(Optional) ensure target mount is a removable device (Linux).")
+    p.add_argument("--path", "-p", help="(DEV) Path to operate on. If omitted, app uses detected USB mount.", default=None)
+    p.add_argument("--require-removable", action="store_true", help="Ensure target is a removable device (Linux only).")
     return p.parse_args()
 
+
 def is_block_device_removable(mount_path: str) -> bool:
-    """
-    Linux: check /proc/mounts -> device -> /sys/block/<dev>/removable
-    Returns False on failure or if not removable.
-    """
+    """Linux: check if a mount corresponds to a removable block device."""
     try:
         import re
-        # find device for mount
         with open("/proc/mounts", "r") as f:
             for line in f:
                 parts = line.split()
                 if len(parts) >= 2 and parts[1] == mount_path:
-                    dev = parts[0]  # e.g. /dev/sdb1
-                    # simplify to block (sdb)
+                    dev = parts[0]
                     devname = os.path.basename(dev)
-                    # strip partition number (e.g., sdb1 -> sdb)
                     devbase = re.sub(r"\d+$", "", devname)
                     removable_path = f"/sys/block/{devbase}/removable"
                     if os.path.exists(removable_path):
@@ -86,12 +76,19 @@ def is_block_device_removable(mount_path: str) -> bool:
         return False
     return False
 
+
 def main():
     args = parse_args()
+    usb_mount = find_usb_mount()
+    usb_script_mount = detect_usb_root_from_script()
+
+    # Decide target mount
     if args.path:
         target = args.path
+    elif usb_mount:
+        target = usb_mount
     else:
-        target = detect_usb_root_from_script()
+        target = usb_script_mount
 
     if not os.path.exists(target):
         print(f"[ERROR] target path does not exist: {target}")
@@ -102,9 +99,23 @@ def main():
             print("[ERROR] target is not a removable block device (or detection failed). Exiting.")
             return
 
-    print(f"Operating on target mount: {target}")
-    # from here on, use 'target' as your usb_root for watcher/scans
-    # e.g., pass to scan_initial_files(target), start_watcher(target), etc.
+    log_path = os.path.join(os.path.dirname(__file__), "logs")
+    os.makedirs(log_path, exist_ok=True)
+
+    print(f"Operating on target mount: {target}\n")
+    print("Choose an action:")
+    print("1. Run a one-time scan")
+    print("2. Start real-time monitoring")
+
+    choice = input("\nEnter your choice (1 or 2): ").strip()
+
+    if choice == "1":
+        scan_usb(target, log_path)
+    elif choice == "2":
+        start_monitoring(target, log_path)
+    else:
+        print("Invalid choice. Exiting...")
+
 
 if __name__ == "__main__":
     main()
