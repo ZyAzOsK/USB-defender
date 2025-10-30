@@ -3,6 +3,7 @@ import os
 from watchdog.observers import Observer
 from watchdog.events import FileSystemEventHandler
 from datetime import datetime
+from logger import log_event
 import csv
 
 class USBEventHandler(FileSystemEventHandler):
@@ -20,13 +21,8 @@ class USBEventHandler(FileSystemEventHandler):
                 writer.writerow(["Timestamp", "Event Type", "File Path"])
 
     def log_event(self, event_type, file_path):
-        with open(self.log_file, 'a', newline='') as f:
-            writer = csv.writer(f)
-            writer.writerow([
-                datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
-                event_type,
-                file_path
-            ])
+        """Logs file system events (create/modify/delete) with metadata."""
+        log_event(event_type, file_path)  # use central logger
         print(f"{event_type.upper()}: {file_path}")
 
     def on_created(self, event):
