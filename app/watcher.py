@@ -36,6 +36,13 @@ class USBEventHandler(FileSystemEventHandler):
     def on_modified(self, event):
         if not event.is_directory:
             self.log_event("Modified", event.src_path)
+    def on_moved(self, event):
+        if event.is_directory:
+            return
+        from_path = event.src_path
+        to_path = event.dest_path
+        print(f"MOVED: {from_path} → {to_path}")
+        log_event("MOVED", f"{from_path} → {to_path}")
 
 def start_monitoring(usb_path, log_path):
     event_handler = USBEventHandler(usb_path, log_path)
