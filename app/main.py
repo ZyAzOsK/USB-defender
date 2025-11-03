@@ -4,8 +4,9 @@ import platform
 import argparse
 import psutil
 from pathlib import Path
-from scanner import scan_usb
+from scanner import scan_target
 from watcher import start_monitoring
+
 
 
 def find_usb_mount():
@@ -110,7 +111,7 @@ def main():
     choice = input("\nEnter your choice (1 or 2): ").strip()
 
     if choice == "1":
-        scan_usb(target, log_path)
+        scan_target(target)
     elif choice == "2":
         start_monitoring(target, log_path)
     else:

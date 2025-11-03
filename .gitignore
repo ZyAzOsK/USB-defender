@@ -10,11 +10,11 @@ __pycache__/
 env/
 venv/
 
-# 🧾 Logs and temp data
+# USB Defender generated files
+app/signatures.json
 app/logs/
-*.log
-*.csv
 *.db
+
 
 # 📦 Build artifacts
 build/
