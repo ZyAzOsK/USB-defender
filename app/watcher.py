@@ -1,10 +1,11 @@
 import time
 import os
+import csv
 from watchdog.observers import Observer
 from watchdog.events import FileSystemEventHandler
 from datetime import datetime
 from logger import log_event
-import csv
+from detector import detect_threat
 
 class USBEventHandler(FileSystemEventHandler):
     def __init__(self, usb_path, log_path):
@@ -21,9 +22,17 @@ class USBEventHandler(FileSystemEventHandler):
                 writer.writerow(["Timestamp", "Event Type", "File Path"])
 
     def log_event(self, event_type, file_path):
-        """Logs file system events (create/modify/delete) with metadata."""
-        log_event(event_type, file_path)  # use central logger
-        print(f"{event_type.upper()}: {file_path}")
+        """Logs file system events (create/modify/delete) with metadata + threat tag."""
+        result_tag = None
+
+        # Only scan file content on creation or modification
+        if event_type.lower() in ("created", "modified"):
+            result_tag = detect_threat(file_path)
+
+        # Use centralized logger
+        log_event(event_type, file_path, result_tag)
+        print(f"{event_type.upper()}: {file_path} | Tag: {result_tag or 'Clean'}")
+
 
     def on_created(self, event):
         if not event.is_directory:

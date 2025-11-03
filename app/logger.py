@@ -4,6 +4,7 @@ import sqlite3
 import hashlib
 import datetime
 from pathlib import Path
+from signatures import match_file
 
 LOG_DIR = Path(__file__).resolve().parent / "logs"
 LOG_FILE = LOG_DIR / "activity.log"
@@ -42,6 +43,8 @@ def compute_sha256(file_path: str):
 
 # --- MAIN LOGGER ---
 def log_event(event_type, file_path, result_tag=None):
+    from signatures import match_file  # import locally to avoid circular dependency
+
     ts = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
     file_size = None
     sha256 = None
@@ -51,6 +54,12 @@ def log_event(event_type, file_path, result_tag=None):
             file_size = os.path.getsize(file_path)
             if event_type in ("CREATED", "MODIFIED"):
                 sha256 = compute_sha256(file_path)
+
+                # threat Intelligence phase
+                # Check file against known hashes or suspicious patterns
+                is_suspicious, tag = match_file(file_path)
+                if is_suspicious:
+                    result_tag = tag
     except Exception:
         pass
 
@@ -67,5 +76,3 @@ def log_event(event_type, file_path, result_tag=None):
     )
     conn.commit()
     conn.close()
-
-init_db()
