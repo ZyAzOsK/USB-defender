@@ -7,32 +7,39 @@ from datetime import datetime
 from logger import log_event
 from detector import detect_threat
 
+
 class USBEventHandler(FileSystemEventHandler):
     def __init__(self, usb_path, log_path):
         super().__init__()
         self.usb_path = usb_path
         self.log_path = log_path
-        self.log_file = os.path.join(log_path, 'activity_log.csv')
+        self.log_file = os.path.join(log_path, "activity_log.csv")
         os.makedirs(log_path, exist_ok=True)
 
-        # Create header if file doesn’t exist
+        # Create CSV header if file doesn’t exist
         if not os.path.exists(self.log_file):
-            with open(self.log_file, 'w', newline='') as f:
+            with open(self.log_file, "w", newline="") as f:
                 writer = csv.writer(f)
                 writer.writerow(["Timestamp", "Event Type", "File Path"])
 
     def log_event(self, event_type, file_path):
         """Logs file system events (create/modify/delete) with metadata + threat tag."""
-        result_tag = None
+
+        findings = []  # Always define to avoid NameError
 
         # Only scan file content on creation or modification
         if event_type.lower() in ("created", "modified"):
-            result_tag = detect_threat(file_path)
+            findings = detect_threat(file_path)
 
-        # Use centralized logger
-        log_event(event_type, file_path, result_tag)
-        print(f"{event_type.upper()}: {file_path} | Tag: {result_tag or 'Clean'}")
+        # Combine multiple tags into a readable string
+        if findings:
+            tags = ", ".join(f["tag"] for f in findings)
+        else:
+            tags = "Clean"
 
+        # Use centralized logger and show result
+        log_event(event_type, file_path, tags)
+        print(f"{event_type.upper()}: {file_path} → {tags}")
 
     def on_created(self, event):
         if not event.is_directory:
@@ -45,6 +52,7 @@ class USBEventHandler(FileSystemEventHandler):
     def on_modified(self, event):
         if not event.is_directory:
             self.log_event("Modified", event.src_path)
+
     def on_moved(self, event):
         if event.is_directory:
             return
@@ -53,11 +61,14 @@ class USBEventHandler(FileSystemEventHandler):
         print(f"MOVED: {from_path} → {to_path}")
         log_event("MOVED", f"{from_path} → {to_path}")
 
+
 def start_monitoring(usb_path, log_path):
+    """Start real-time monitoring of the USB drive."""
     event_handler = USBEventHandler(usb_path, log_path)
     observer = Observer()
     observer.schedule(event_handler, usb_path, recursive=True)
     observer.start()
+
     print(f"Real-time monitoring started on: {usb_path}")
     print("Press Ctrl+C to stop.\n")
 

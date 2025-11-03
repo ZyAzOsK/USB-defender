@@ -40,6 +40,7 @@ DEFAULT_SIGNATURES = {
 KNOWN_BAD_HASHES = {
     # Example known-bad samples
     "44d88612fea8a8f36de82e1278abb02f": "EICAR_Test_File",
+    "fe42dcc3454c3193434b4ee6029c9b898d8f48765b3fc547ac38c009b91a3b8a": "Test_EICAR_Dummy_File",
     "e2fc714c4727ee9395f324cd2e7f331f": "Sample_Malware",
 }
 
