@@ -6,6 +6,7 @@ from watchdog.events import FileSystemEventHandler
 from datetime import datetime
 from logger import log_event
 from detector import detect_threat
+from threat_intel import enrich_tag 
 
 
 class USBEventHandler(FileSystemEventHandler):
@@ -20,26 +21,37 @@ class USBEventHandler(FileSystemEventHandler):
         if not os.path.exists(self.log_file):
             with open(self.log_file, "w", newline="") as f:
                 writer = csv.writer(f)
-                writer.writerow(["Timestamp", "Event Type", "File Path"])
+                writer.writerow([
+                    "Timestamp",
+                    "Event Type",
+                    "File Path",
+                    "Tag",
+                    "Severity",
+                    "Category",
+                    "Action",
+                    "Description"
+                ])
 
     def log_event(self, event_type, file_path):
-        """Logs file system events (create/modify/delete) with metadata + threat tag."""
+        """Logs file system events (create/modify/delete) with metadata + threat intelligence."""
 
-        findings = []  # Always define to avoid NameError
+        findings = []
 
         # Only scan file content on creation or modification
         if event_type.lower() in ("created", "modified"):
             findings = detect_threat(file_path)
 
-        # Combine multiple tags into a readable string
         if findings:
-            tags = ", ".join(f["tag"] for f in findings)
+            # Enrich each finding with threat intelligence
+            enriched_findings = [enrich_tag(f["tag"]) for f in findings]
         else:
-            tags = "Clean"
+            enriched_findings = [{"tag": "Clean", "severity": 0, "category": "None",
+                                  "action": "No action needed", "description": "No threat detected."}]
 
-        # Use centralized logger and show result
-        log_event(event_type, file_path, tags)
-        print(f"{event_type.upper()}: {file_path} → {tags}")
+        # Log all enriched findings
+        for info in enriched_findings:
+            log_event(event_type, file_path, info)
+            print(f"{event_type.upper()}: {file_path} → {info['tag']} (Severity: {info['severity']})")
 
     def on_created(self, event):
         if not event.is_directory:
@@ -59,7 +71,14 @@ class USBEventHandler(FileSystemEventHandler):
         from_path = event.src_path
         to_path = event.dest_path
         print(f"MOVED: {from_path} → {to_path}")
-        log_event("MOVED", f"{from_path} → {to_path}")
+        # Treat as a metadata event; no content scan
+        log_event("MOVED", f"{from_path} → {to_path}", {
+            "tag": "File Moved",
+            "severity": 0,
+            "category": "File System",
+            "action": "No action",
+            "description": "File was moved or renamed."
+        })
 
 
 def start_monitoring(usb_path, log_path):
