@@ -26,7 +26,7 @@ DEFAULT_SIGNATURES = {
         {
             "name": "Suspicious_HTML_Executable",
             "patterns": ["<script>", "base64,", "powershell", "cmd.exe"],
-            "extensions": [".html", ".htm"]
+            "extensions": [".html", ".htm", ".txt"]
         },
         {
             "name": "Potential_Malicious_Python",
