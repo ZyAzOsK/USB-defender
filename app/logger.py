@@ -8,7 +8,6 @@ LOG_DIR = Path(__file__).resolve().parent / "logs"
 LOG_FILE = LOG_DIR / "activity.log"
 DB_FILE = Path(__file__).resolve().parent / "usb_defender.db"
 
-
 os.makedirs(LOG_DIR, exist_ok=True)
 
 # --- DB INITIALIZATION ---
@@ -28,7 +27,8 @@ def init_db():
             severity INTEGER,
             category TEXT,
             action TEXT,
-            description TEXT
+            description TEXT,
+            quarantine_path TEXT
         )
     """)
     conn.commit()
@@ -52,7 +52,9 @@ def compute_sha256(file_path: str):
 def log_event(event_type, file_path, info):
     """
     Log a filesystem event to both text and SQLite DB.
-    info: dict containing keys -> tag, severity, category, action, description
+    info dict must contain:
+       tag, severity, category, action, description
+       quarantine_path (optional)
     """
     ts = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
     file_size = None
@@ -71,13 +73,15 @@ def log_event(event_type, file_path, info):
     category = info.get("category", "Unknown")
     action = info.get("action", "None")
     description = info.get("description", "No description available")
+    quarantine_path = info.get("quarantine_path", None)
 
     # --- Text log entry ---
     with open(LOG_FILE, "a") as f:
         f.write(
             f"[{ts}] {event_type}: {file_path} "
             f"(size={file_size}, sha256={sha256}) "
-            f"→ Tag={tag}, Severity={severity}, Category={category}\n"
+            f"→ Tag={tag}, Severity={severity}, Category={category}, "
+            f"Quarantine={quarantine_path}\n"
         )
 
     # --- Database record ---
@@ -86,12 +90,12 @@ def log_event(event_type, file_path, info):
     cur.execute("""
         INSERT INTO logs (
             timestamp, event_type, file_path, file_size, sha256,
-            tag, severity, category, action, description
+            tag, severity, category, action, description, quarantine_path
         )
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
     """, (
         ts, event_type, file_path, file_size, sha256,
-        tag, severity, category, action, description
+        tag, severity, category, action, description, quarantine_path
     ))
     conn.commit()
     conn.close()
