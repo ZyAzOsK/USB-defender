@@ -34,3 +34,7 @@ Thumbs.db
 *.tmp
 *.swp
 *.swo
+
+# Quarantine summary (auto-generated)
+app/quarantine_summary.json
+
