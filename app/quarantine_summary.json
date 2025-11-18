@@ -1,0 +1,15 @@
+{
+    "generated_at": "2025-11-18 23:35:21",
+    "stats": {
+        "total_quarantined": 2,
+        "total_severity_score": 16,
+        "daily_quarantined": 2,
+        "weekly_quarantined": 2
+    },
+    "top_threats": [
+        {
+            "tag": "Suspicious_HTML_Executable",
+            "count": 2
+        }
+    ]
+}
