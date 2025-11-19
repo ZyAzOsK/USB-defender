@@ -12,9 +12,12 @@ venv/
 
 # USB Defender generated files
 app/signatures.json
+signatures.json
 app/logs/
 *.db
-
+quarantine/
+*.qfile
+*.meta.json
 
 # Build artifacts
 build/
@@ -37,4 +40,3 @@ Thumbs.db
 
 # Quarantine summary (auto-generated)
 app/quarantine_summary.json
-
