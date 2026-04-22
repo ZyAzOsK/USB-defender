@@ -3,21 +3,28 @@
 signatures.py
 --------------
 Unified malware signature + heuristic rule engine.
-Now supports:
-- JSON-based signatures
+Supports:
+- JSON-based signatures (rules + hashes)
 - Python-side known hashes (KNOWN_BAD_HASHES)
 - HTML/script special-case scanning
-- .txt injection detection
+- File size limit for heuristic scanning (OOM protection)
+- Multi-tag detection (returns ALL matches)
 """
 
 import json
-import hashlib
+import os
 from pathlib import Path
+from db import compute_sha256
 
 # ==============================
 # Paths
 # ==============================
 SIGNATURE_FILE = Path(__file__).resolve().parent / "signatures.json"
+
+# ==============================
+# OOM Protection
+# ==============================
+MAX_HEURISTIC_SIZE = 5 * 1024 * 1024  # 5 MB — skip heuristic reads for larger files
 
 # ==============================
 # Python Hardcoded Known Hashes
@@ -61,9 +68,30 @@ DEFAULT_SIGNATURES = {
             "name": "Potential_Malicious_Python",
             "patterns": ["import os", "exec(", "subprocess", "socket"],
             "extensions": [".py"]
+        },
+        {
+            "name": "Suspicious_Batch_Script",
+            "patterns": ["del /f", "format ", "net user", "reg add", "reg delete", "taskkill"],
+            "extensions": [".bat", ".cmd"]
+        },
+        {
+            "name": "Suspicious_PowerShell_Script",
+            "patterns": ["invoke-webrequest", "iex", "downloadstring", "-encodedcommand",
+                         "invoke-expression", "new-object net.webclient"],
+            "extensions": [".ps1"]
+        },
+        {
+            "name": "Suspicious_VBS_Script",
+            "patterns": ["wscript.shell", "createobject", "activexobject", "shell.application"],
+            "extensions": [".vbs", ".js", ".wsf"]
         }
     ]
 }
+
+# ==============================
+# Signature cache (avoid re-reading JSON every call)
+# ==============================
+_cached_signatures = None
 
 
 def ensure_signatures():
@@ -73,30 +101,35 @@ def ensure_signatures():
 
 
 def load_signatures():
+    global _cached_signatures
+    if _cached_signatures is not None:
+        return _cached_signatures
+
     ensure_signatures()
     with open(SIGNATURE_FILE, "r") as f:
-        return json.load(f)
+        _cached_signatures = json.load(f)
+    return _cached_signatures
 
 
-# ==============================
-# Compute SHA256 for scanning
-# ==============================
-def compute_sha256(path: str):
-    try:
-        h = hashlib.sha256()
-        with open(path, "rb") as f:
-            for chunk in iter(lambda: f.read(8192), b""):
-                h.update(chunk)
-        return h.hexdigest()
-    except Exception:
-        return None
+def reload_signatures():
+    """Force reload of signatures from disk (e.g. after user edits signatures.json)."""
+    global _cached_signatures
+    _cached_signatures = None
+    return load_signatures()
 
 
 # ==============================
 # MATCH FILE AGAINST SIGNATURES
+# Returns list of (tag, match_type) tuples
 # ==============================
 def match_file(file_path: str):
+    """
+    Scan a file against all signature/heuristic rules.
+    Returns: (is_suspicious: bool, tags: list[str])
+    If clean, returns (False, [])
+    """
     sigs = load_signatures()
+    tags = []
 
     sha256 = compute_sha256(file_path)
     ext = Path(file_path).suffix.lower()
@@ -104,43 +137,50 @@ def match_file(file_path: str):
     # -------------------------------
     # 1. Python-side known bad hashes
     # -------------------------------
-    if sha256 in KNOWN_BAD_HASHES:
-        return True, KNOWN_BAD_HASHES[sha256]
+    if sha256 and sha256 in KNOWN_BAD_HASHES:
+        tags.append(KNOWN_BAD_HASHES[sha256])
 
     # -------------------------------
     # 2. JSON malware_hashes
     # -------------------------------
-    if sha256 in sigs["malware_hashes"]:
-        return True, "Known_Malware_Hash"
+    if sha256 and sha256 in sigs.get("malware_hashes", []):
+        if "Known_Malware_Hash" not in tags:
+            tags.append("Known_Malware_Hash")
 
     # -------------------------------
-    # 3. HTML/script quick heuristics
+    # 3. Heuristic scanning (with OOM protection)
+    #    Single file read for both HTML patterns and JSON rules
     # -------------------------------
     try:
-        with open(file_path, "r", errors="ignore") as f:
-            content = f.read().lower()
+        file_size = os.path.getsize(file_path)
+    except OSError:
+        file_size = 0
 
-        for pattern, tag in HTML_SCRIPT_PATTERNS:
-            if pattern in content:
-                return True, tag
-    except Exception:
-        pass
+    if file_size <= MAX_HEURISTIC_SIZE and file_size > 0:
+        try:
+            with open(file_path, "r", errors="ignore") as f:
+                content = f.read().lower()
+
+            # 3a. HTML/script quick heuristics
+            for pattern, tag in HTML_SCRIPT_PATTERNS:
+                if pattern in content:
+                    if tag not in tags:
+                        tags.append(tag)
+
+            # 3b. JSON heuristic rule matching
+            for rule in sigs.get("rules", []):
+                if ext in rule.get("extensions", []):
+                    if any(p.lower() in content for p in rule.get("patterns", [])):
+                        rule_name = rule["name"]
+                        if rule_name not in tags:
+                            tags.append(rule_name)
+
+        except Exception:
+            pass
 
     # -------------------------------
-    # 4. JSON Heuristic Rule Matching
+    # Result
     # -------------------------------
-    try:
-        with open(file_path, "r", errors="ignore") as f:
-            content = f.read().lower()
-
-        for rule in sigs["rules"]:
-            if ext in rule["extensions"]:
-                if any(p in content for p in rule["patterns"]):
-                    return True, rule["name"]
-    except Exception:
-        pass
-
-    # -------------------------------
-    # 5. Clean
-    # -------------------------------
-    return False, None
+    if tags:
+        return True, tags
+    return False, []

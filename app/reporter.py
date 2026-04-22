@@ -1,46 +1,52 @@
 #!/usr/bin/env python3
+"""
+reporter.py
+-----------
+CLI log viewer and CSV exporter.
+Reads from the unified SQLite database.
+"""
+
 import sqlite3
 from tabulate import tabulate
 import argparse
 import csv
-from pathlib import Path
-
-LOG_DB = Path(__file__).resolve().parent / "usb_defender.db"
+from db import DB_FILE, get_connection, _db_lock
 
 
 # -------------------------
 # FETCH NORMAL LOG ENTRIES
 # -------------------------
 def fetch_logs(event=None, start=None, end=None, limit=50):
-    conn = sqlite3.connect(LOG_DB)
-    cur = conn.cursor()
+    with _db_lock:
+        conn = get_connection()
+        cur = conn.cursor()
 
-    query = """
-        SELECT timestamp, event_type, file_path, file_size, sha256,
-               tag, severity, category, action, description, quarantine_path
-        FROM logs
-        WHERE 1=1
-    """
-    params = []
+        query = """
+            SELECT timestamp, event_type, file_path, file_size, sha256,
+                   tag, severity, category, action, description, quarantine_path
+            FROM logs
+            WHERE 1=1
+        """
+        params = []
 
-    if event:
-        query += " AND event_type = ?"
-        params.append(event.upper())
+        if event:
+            query += " AND event_type = ?"
+            params.append(event.upper())
 
-    if start:
-        query += " AND timestamp >= ?"
-        params.append(start)
+        if start:
+            query += " AND timestamp >= ?"
+            params.append(start)
 
-    if end:
-        query += " AND timestamp <= ?"
-        params.append(end)
+        if end:
+            query += " AND timestamp <= ?"
+            params.append(end)
 
-    query += " ORDER BY id DESC LIMIT ?"
-    params.append(limit)
+        query += " ORDER BY id DESC LIMIT ?"
+        params.append(limit)
 
-    cur.execute(query, params)
-    rows = cur.fetchall()
-    conn.close()
+        cur.execute(query, params)
+        rows = cur.fetchall()
+        conn.close()
     return rows
 
 
@@ -73,7 +79,6 @@ def main():
 
     args = parser.parse_args()
 
-    # --- NORMAL LOGS ---
     rows = fetch_logs(args.event, args.start, args.end, args.limit)
 
     if not rows:

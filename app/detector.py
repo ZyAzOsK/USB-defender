@@ -2,9 +2,9 @@
 """
 Unified threat detection engine.
 Uses:
- - match_file() from signatures.py
+ - match_file() from signatures.py (now returns multi-tag results)
  - enrich_tag() from threat_intel.py
- - returns full structured detection results
+ - returns full structured detection results for ALL matches
 """
 
 import os
@@ -14,27 +14,22 @@ from threat_intel import enrich_tag
 
 def detect_threat(file_path):
     """
-    Returns a list of structured detection results:
-    [
-        {
-            "tag": "Suspicious_HTML_Executable",
-            "severity": 8,
-            "category": "Script Injection",
-            "action": "Inspect and delete if untrusted",
-            "description": "...",
-        }
-    ]
+    Returns a list of structured detection results, one per matched rule.
+    Returns empty list if clean or file doesn't exist.
     """
 
     if not os.path.exists(file_path):
         return []
 
-    detected, tag = match_file(file_path)
+    detected, tags = match_file(file_path)
 
     if not detected:
         return []
 
-    # threat_intel gives full structured info
-    info = enrich_tag(tag)
+    # Enrich every matched tag
+    results = []
+    for tag in tags:
+        info = enrich_tag(tag)
+        results.append(info)
 
-    return [info]
+    return results

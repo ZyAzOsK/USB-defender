@@ -40,3 +40,12 @@ Thumbs.db
 
 # Quarantine summary (auto-generated)
 app/quarantine_summary.json
+
+# Compiled Sidecars
+dashboard/src-tauri/sidecars/usb-defender-*
+
+# Tests & Scratch
+.pytest_cache/
+ws_test.py
+claude_briefing.md
+

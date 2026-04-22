@@ -1,13 +1,21 @@
 #!/usr/bin/env python3
+"""
+quarantine_manager.py
+---------------------
+CLI tool to list, restore, delete, and summarize quarantined files.
+Supports Fernet decryption on restore.
+"""
+
 import sqlite3
 from tabulate import tabulate
 import argparse
 import json
 import os
-import shutil
 from pathlib import Path
+from cryptography.fernet import Fernet
 
-DB_FILE = Path(__file__).resolve().parent / "usb_defender.db"
+from db import DB_FILE, get_connection, _db_lock
+
 SUMMARY_FILE = Path(__file__).resolve().parent / "quarantine_summary.json"
 
 
@@ -15,72 +23,119 @@ SUMMARY_FILE = Path(__file__).resolve().parent / "quarantine_summary.json"
 # LIST QUARANTINED ITEMS
 # -----------------------------------
 def list_quarantined():
-    conn = sqlite3.connect(DB_FILE)
-    cur = conn.cursor()
+    with _db_lock:
+        conn = get_connection()
+        cur = conn.cursor()
 
-    cur.execute("""
-        SELECT id, timestamp, original_path, quarantine_path, meta_path,
-               tag, severity, category
-        FROM quarantine ORDER BY id DESC
-    """)
+        cur.execute("""
+            SELECT id, timestamp, original_path, quarantine_path, meta_path,
+                   tag, severity, category
+            FROM quarantine ORDER BY id DESC
+        """)
 
-    rows = cur.fetchall()
-    conn.close()
+        rows = cur.fetchall()
+        conn.close()
     return rows
 
 
 # -----------------------------------
-# RESTORE
+# RESTORE (with decryption)
 # -----------------------------------
 def restore_quarantined(entry_id):
-    conn = sqlite3.connect(DB_FILE)
-    cur = conn.cursor()
+    with _db_lock:
+        conn = get_connection()
+        cur = conn.cursor()
 
-    cur.execute("SELECT original_path, quarantine_path FROM quarantine WHERE id = ?", (entry_id,))
-    row = cur.fetchone()
-    if not row:
-        print("❌ No such quarantine entry.")
-        return
+        cur.execute(
+            "SELECT original_path, quarantine_path, meta_path FROM quarantine WHERE id = ?",
+            (entry_id,)
+        )
+        row = cur.fetchone()
+        if not row:
+            print("❌ No such quarantine entry.")
+            conn.close()
+            return
 
-    original_path, quarantine_path = row
+        original_path, quarantine_path, meta_path = row
 
-    try:
-        shutil.move(quarantine_path, original_path)
-        print(f"✅ Restored file to: {original_path}")
-    except Exception as e:
-        print(f"❌ Restore failed: {e}")
-        return
+        # --- Read encryption key from metadata ---
+        try:
+            with open(meta_path, "r") as f:
+                metadata = json.load(f)
+            encryption_key = metadata.get("encryption_key")
+        except Exception as e:
+            print(f"❌ Failed to read metadata: {e}")
+            conn.close()
+            return
 
-    conn.close()
+        # --- Decrypt the quarantined file ---
+        try:
+            with open(quarantine_path, "rb") as f:
+                encrypted_data = f.read()
+
+            if encryption_key:
+                fernet = Fernet(encryption_key.encode("utf-8"))
+                decrypted_data = fernet.decrypt(encrypted_data)
+            else:
+                # Legacy: unencrypted quarantine files
+                decrypted_data = encrypted_data
+
+            # --- Ensure parent directory exists ---
+            os.makedirs(os.path.dirname(original_path), exist_ok=True)
+
+            # --- Write restored file ---
+            with open(original_path, "wb") as f:
+                f.write(decrypted_data)
+
+            # --- Clean up quarantine files ---
+            os.remove(quarantine_path)
+            if meta_path and os.path.exists(meta_path):
+                os.remove(meta_path)
+
+            print(f"✅ Restored file to: {original_path}")
+
+        except Exception as e:
+            print(f"❌ Restore failed: {e}")
+            conn.close()
+            return
+
+        # --- Delete DB record (fix: was missing before!) ---
+        cur.execute("DELETE FROM quarantine WHERE id = ?", (entry_id,))
+        conn.commit()
+        conn.close()
+
+    print("🗄️ Quarantine record removed from database.")
 
 
 # -----------------------------------
 # DELETE (file + metadata + DB record)
 # -----------------------------------
 def delete_quarantined(entry_id):
-    conn = sqlite3.connect(DB_FILE)
-    cur = conn.cursor()
+    with _db_lock:
+        conn = get_connection()
+        cur = conn.cursor()
 
-    cur.execute("SELECT quarantine_path, meta_path FROM quarantine WHERE id = ?", (entry_id,))
-    row = cur.fetchone()
-    if not row:
-        print("❌ No such quarantine entry.")
-        return
+        cur.execute("SELECT quarantine_path, meta_path FROM quarantine WHERE id = ?", (entry_id,))
+        row = cur.fetchone()
+        if not row:
+            print("❌ No such quarantine entry.")
+            conn.close()
+            return
 
-    quarantine_path, meta_path = row
+        quarantine_path, meta_path = row
 
-    # Remove files safely
-    for path in [quarantine_path, meta_path]:
-        if path and os.path.exists(path):
-            try:
-                os.remove(path)
-            except Exception:
-                pass
+        # Remove files safely
+        for path in [quarantine_path, meta_path]:
+            if path and os.path.exists(path):
+                try:
+                    os.remove(path)
+                except Exception:
+                    pass
 
-    # Remove DB record
-    cur.execute("DELETE FROM quarantine WHERE id = ?", (entry_id,))
-    conn.commit()
-    conn.close()
+        # Remove DB record
+        cur.execute("DELETE FROM quarantine WHERE id = ?", (entry_id,))
+        conn.commit()
+        conn.close()
 
     print("🗑️ Deleted quarantine entry + related files.")
 
@@ -112,13 +167,9 @@ def show_summary():
         tablefmt="fancy_grid"
     ))
 
-    # ---- FIXED TOP THREATS TABLE ----
     if top:
         print("\n🔥 TOP THREATS\n")
-
-        # Convert dicts → list-of-lists
         top_rows = [[item["tag"], item["count"]] for item in top]
-
         print(tabulate(
             top_rows,
             headers=["Tag", "Count"],
@@ -126,7 +177,6 @@ def show_summary():
         ))
     else:
         print("\n(No threats recorded yet)\n")
-
 
 
 # -----------------------------------
@@ -170,7 +220,6 @@ def main():
         delete_quarantined(args.delete)
         return
 
-    # If no args
     parser.print_help()
 
 

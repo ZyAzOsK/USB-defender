@@ -1,49 +1,54 @@
 # app/quarantine.py
+"""
+Quarantine engine — moves, encrypts, and records malicious files.
+Files are encrypted with Fernet before storage to neutralize payloads.
+"""
 
 import os
-import shutil
 import uuid
 import json
 import sqlite3
 from pathlib import Path
 from datetime import datetime, timedelta
+from cryptography.fernet import Fernet
 
-DB_FILE = Path(__file__).resolve().parent / "usb_defender.db"
+from db import DB_FILE, get_connection, _db_lock
+
 SUMMARY_FILE = Path(__file__).resolve().parent / "quarantine_summary.json"
 
 
 def update_summary():
     """Rebuild quarantine_summary.json from DB."""
+    with _db_lock:
+        conn = get_connection()
+        cur = conn.cursor()
 
-    conn = sqlite3.connect(DB_FILE)
-    cur = conn.cursor()
+        # --- All-time stats ---
+        cur.execute("SELECT COUNT(*), SUM(severity) FROM quarantine")
+        total_count, total_severity = cur.fetchone()
+        total_severity = total_severity or 0
 
-    # --- All-time stats ---
-    cur.execute("SELECT COUNT(*), SUM(severity) FROM quarantine")
-    total_count, total_severity = cur.fetchone()
-    total_severity = total_severity or 0
+        # --- Daily stats ---
+        today = datetime.now().strftime("%Y-%m-%d")
+        cur.execute("SELECT COUNT(*) FROM quarantine WHERE timestamp LIKE ?", (f"{today}%",))
+        daily_count = cur.fetchone()[0]
 
-    # --- Daily stats ---
-    today = datetime.now().strftime("%Y-%m-%d")
-    cur.execute("SELECT COUNT(*) FROM quarantine WHERE timestamp LIKE ?", (f"{today}%",))
-    daily_count = cur.fetchone()[0]
+        # --- Weekly stats ---
+        week_ago = (datetime.now() - timedelta(days=7)).strftime("%Y-%m-%d %H:%M:%S")
+        cur.execute("SELECT COUNT(*) FROM quarantine WHERE timestamp >= ?", (week_ago,))
+        weekly_count = cur.fetchone()[0]
 
-    # --- Weekly stats ---
-    week_ago = (datetime.now() - timedelta(days=7)).strftime("%Y-%m-%d %H:%M:%S")
-    cur.execute("SELECT COUNT(*) FROM quarantine WHERE timestamp >= ?", (week_ago,))
-    weekly_count = cur.fetchone()[0]
+        # --- Top threats ---
+        cur.execute("""
+            SELECT tag, COUNT(*) AS hits
+            FROM quarantine
+            GROUP BY tag
+            ORDER BY hits DESC
+            LIMIT 5
+        """)
+        top_threats = [{"tag": t, "count": c} for t, c in cur.fetchall()]
 
-    # --- Top threats ---
-    cur.execute("""
-        SELECT tag, COUNT(*) AS hits
-        FROM quarantine
-        GROUP BY tag
-        ORDER BY hits DESC
-        LIMIT 5
-    """)
-    top_threats = [{"tag": t, "count": c} for t, c in cur.fetchall()]
-
-    conn.close()
+        conn.close()
 
     summary = {
         "generated_at": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
@@ -62,8 +67,14 @@ def update_summary():
 
 def quarantine_file(file_path, info, quarantine_dir):
     """
-    Move suspicious file to quarantine folder + create metadata + DB entry +
-    update quarantine_summary.json.
+    Quarantine a suspicious file:
+    1. Read its contents
+    2. Encrypt with Fernet
+    3. Write encrypted data as .qfile
+    4. Delete the original
+    5. Store encryption key + metadata in .meta.json
+    6. Insert DB record
+    7. Update summary
     """
 
     try:
@@ -71,21 +82,35 @@ def quarantine_file(file_path, info, quarantine_dir):
 
         # Unique quarantine filename
         quarantine_id = str(uuid.uuid4())
-        quarantine_file = os.path.join(quarantine_dir, f"{quarantine_id}.qfile")
+        quarantine_path = os.path.join(quarantine_dir, f"{quarantine_id}.qfile")
         metadata_file = os.path.join(quarantine_dir, f"{quarantine_id}.meta.json")
 
-        # Move file into quarantine
-        shutil.move(file_path, quarantine_file)
+        # --- Read original file contents ---
+        with open(file_path, "rb") as f:
+            original_data = f.read()
 
-        print(f"[QUARANTINED] {file_path} -> {quarantine_file}")
+        # --- Generate encryption key and encrypt ---
+        fernet_key = Fernet.generate_key()
+        fernet = Fernet(fernet_key)
+        encrypted_data = fernet.encrypt(original_data)
 
-        # Write metadata json
+        # --- Write encrypted quarantine file ---
+        with open(quarantine_path, "wb") as f:
+            f.write(encrypted_data)
+
+        # --- Remove the original ---
+        os.remove(file_path)
+
+        print(f"[QUARANTINED] {file_path} -> {quarantine_path} (encrypted)")
+
+        # --- Write metadata JSON (includes encryption key) ---
         metadata = {
             "id": quarantine_id,
             "timestamp": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
             "original_path": file_path,
-            "quarantine_path": quarantine_file,
+            "quarantine_path": quarantine_path,
             "meta_path": metadata_file,
+            "encryption_key": fernet_key.decode("utf-8"),
             "tag": info.get("tag"),
             "severity": info.get("severity"),
             "category": info.get("category"),
@@ -96,32 +121,33 @@ def quarantine_file(file_path, info, quarantine_dir):
         with open(metadata_file, "w") as f:
             json.dump(metadata, f, indent=4)
 
-        # Insert DB record
-        conn = sqlite3.connect(DB_FILE)
-        cur = conn.cursor()
+        # --- Insert DB record (thread-safe) ---
+        with _db_lock:
+            conn = get_connection()
+            cur = conn.cursor()
 
-        cur.execute("""
-            INSERT INTO quarantine (
-                timestamp, original_path, quarantine_path,
-                meta_path, tag, severity, category, action, description
-            )
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
-        """, (
-            metadata["timestamp"],
-            metadata["original_path"],
-            metadata["quarantine_path"],
-            metadata["meta_path"],
-            metadata["tag"],
-            metadata["severity"],
-            metadata["category"],
-            metadata["action"],
-            metadata["description"],
-        ))
+            cur.execute("""
+                INSERT INTO quarantine (
+                    timestamp, original_path, quarantine_path,
+                    meta_path, tag, severity, category, action, description
+                )
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """, (
+                metadata["timestamp"],
+                metadata["original_path"],
+                metadata["quarantine_path"],
+                metadata["meta_path"],
+                metadata["tag"],
+                metadata["severity"],
+                metadata["category"],
+                metadata["action"],
+                metadata["description"],
+            ))
 
-        conn.commit()
-        conn.close()
+            conn.commit()
+            conn.close()
 
-        # === Phase 8: Update summary ===
+        # Update summary
         update_summary()
 
         return True

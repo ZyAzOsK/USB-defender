@@ -1,13 +1,26 @@
+"""
+watcher.py
+----------
+Real-time filesystem monitoring using watchdog.
+Features:
+- Event debouncing (0.5s per file)
+- Auto-quarantine for severity >= 8
+- Skip quarantine directory noise
+"""
+
 import time
 import os
-import csv
 from watchdog.observers import Observer
 from watchdog.events import FileSystemEventHandler
 from datetime import datetime
 from logger import log_event
 from detector import detect_threat
 from threat_intel import enrich_tag
-from quarantine import quarantine_file   # <-- NEW
+from quarantine import quarantine_file
+
+
+# Debounce window in seconds
+DEBOUNCE_SECONDS = 0.5
 
 
 class USBEventHandler(FileSystemEventHandler):
@@ -16,50 +29,52 @@ class USBEventHandler(FileSystemEventHandler):
         self.usb_path = usb_path
         self.log_path = log_path
 
-        # === Phase 7.1: Create quarantine folder inside USB ===
+        # Create quarantine folder inside USB
         self.quarantine_dir = os.path.join(usb_path, "quarantine")
         os.makedirs(self.quarantine_dir, exist_ok=True)
 
-        self.log_file = os.path.join(log_path, "activity_log.csv")
         os.makedirs(log_path, exist_ok=True)
 
-        # Create CSV header if file doesn’t exist
-        if not os.path.exists(self.log_file):
-            with open(self.log_file, "w", newline="") as f:
-                writer = csv.writer(f)
-                writer.writerow([
-                    "Timestamp",
-                    "Event Type",
-                    "File Path",
-                    "Tag",
-                    "Severity",
-                    "Category",
-                    "Action",
-                    "Description"
-                ])
+        # Debounce tracker: {file_path: last_event_timestamp}
+        self._last_event = {}
 
     # ============================================================
-    # Helper: ignore noise from /quarantine/ folder completely
+    # Helper: ignore noise from /quarantine/ folder
     # ============================================================
     def _is_in_quarantine(self, path):
-        return self.quarantine_dir in os.path.abspath(path)
+        abs_path = os.path.abspath(path)
+        quarantine_abs = os.path.abspath(self.quarantine_dir)
+        return abs_path.startswith(quarantine_abs)
 
-    def log_event(self, event_type, file_path):
-        """Logs file system events with threat intelligence & auto-quarantine."""
+    def _should_debounce(self, file_path):
+        """Return True if this event should be skipped (too soon after last)."""
+        now = time.time()
+        last = self._last_event.get(file_path, 0)
+        if now - last < DEBOUNCE_SECONDS:
+            return True
+        self._last_event[file_path] = now
+        return False
 
-        findings = []
+    def handle_event(self, event_type, file_path):
+        """Process file system events with threat detection & auto-quarantine."""
 
-        # Skip scanning inside quarantine folder
+        # Skip quarantine folder
         if self._is_in_quarantine(file_path):
             return
+
+        # Debounce rapid duplicate events
+        if self._should_debounce(file_path):
+            return
+
+        findings = []
 
         # Scan only new or modified files
         if event_type.lower() in ("created", "modified"):
             findings = detect_threat(file_path)
 
-        # Threat intel enrichment
+        # Build enriched findings
         if findings:
-            enriched_findings = [enrich_tag(f["tag"]) for f in findings]
+            enriched_findings = findings  # Already enriched by detector.py
         else:
             enriched_findings = [{
                 "tag": "Clean",
@@ -69,16 +84,19 @@ class USBEventHandler(FileSystemEventHandler):
                 "description": "No threat detected."
             }]
 
-        # === Phase 7.3: Auto-quarantine logic ===
+        # Auto-quarantine high severity threats
+        has_quarantined = False
         for info in enriched_findings:
-
-            if info["severity"] >= 8:   # High severity
-                quarantined = quarantine_file(file_path, info, self.quarantine_dir)
-
-                if quarantined:
-                    info["tag"] = info["tag"] + " (QUARANTINED)"
+            if info["severity"] >= 8:
+                if not has_quarantined:
+                    quarantined = quarantine_file(file_path, info, self.quarantine_dir)
+                    if quarantined:
+                        info["tag"] = info["tag"] + " (QUARANTINED)"
+                        has_quarantined = True
+                    else:
+                        info["tag"] = info["tag"] + " (QUARANTINE FAILED)"
                 else:
-                    info["tag"] = info["tag"] + " (QUARANTINE FAILED)"
+                    info["tag"] = info["tag"] + " (QUARANTINED ALREADY)"
 
             log_event(event_type, file_path, info)
             print(f"{event_type.upper()}: {file_path} → {info['tag']} (Severity: {info['severity']})")
@@ -89,23 +107,19 @@ class USBEventHandler(FileSystemEventHandler):
     def on_created(self, event):
         if event.is_directory:
             return
-        if self._is_in_quarantine(event.src_path):
-            return
-        self.log_event("Created", event.src_path)
+        self.handle_event("Created", event.src_path)
 
     def on_deleted(self, event):
         if event.is_directory:
             return
         if self._is_in_quarantine(event.src_path):
             return
-        self.log_event("Deleted", event.src_path)
+        self.handle_event("Deleted", event.src_path)
 
     def on_modified(self, event):
         if event.is_directory:
             return
-        if self._is_in_quarantine(event.src_path):
-            return
-        self.log_event("Modified", event.src_path)
+        self.handle_event("Modified", event.src_path)
 
     def on_moved(self, event):
         if event.is_directory:

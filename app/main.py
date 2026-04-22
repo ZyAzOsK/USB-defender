@@ -1,16 +1,27 @@
 #!/usr/bin/env python3
+"""
+main.py
+-------
+USB-Defender CLI entry point.
+Detects USB mount points and provides scan/monitor operations.
+"""
+
 import os
 import platform
 import argparse
-import psutil
 from pathlib import Path
+from db import init_db
 from scanner import scan_target
 from watcher import start_monitoring
 
 
-
 def find_usb_mount():
-    username = os.getlogin()
+    """Auto-detect USB mount point on Linux."""
+    try:
+        username = os.getlogin()
+    except OSError:
+        username = os.environ.get("USER", "")
+
     possible_paths = [f"/run/media/{username}", f"/media/{username}"]
 
     for path in possible_paths:
@@ -23,6 +34,7 @@ def find_usb_mount():
 
 
 def get_mount_root_of_path(p: Path) -> Path:
+    """Walk up from a path to find its mount root."""
     p = p.resolve()
     if platform.system() == "Windows":
         return Path(p.anchor)
@@ -44,15 +56,23 @@ def get_mount_root_of_path(p: Path) -> Path:
 
 
 def detect_usb_root_from_script() -> str:
+    """Detect USB root based on where this script is running from."""
     running_file = Path(__file__).resolve()
     mount_root = get_mount_root_of_path(running_file)
     return str(mount_root)
 
 
 def parse_args():
-    p = argparse.ArgumentParser(description="USB Threat Behavior Logger")
-    p.add_argument("--path", "-p", help="(DEV) Path to operate on. If omitted, app uses detected USB mount.", default=None)
-    p.add_argument("--require-removable", action="store_true", help="Ensure target is a removable device (Linux only).")
+    p = argparse.ArgumentParser(description="USB Defender — Portable USB Security Tool")
+    p.add_argument("--path", "-p",
+                    help="Path to operate on. If omitted, auto-detects USB mount.",
+                    default=None)
+    p.add_argument("--require-removable", action="store_true",
+                    help="Ensure target is a removable device (Linux only).")
+    p.add_argument("--scan", action="store_true",
+                    help="Run one-time scan (non-interactive mode).")
+    p.add_argument("--monitor", action="store_true",
+                    help="Start real-time monitoring (non-interactive mode).")
     return p.parse_args()
 
 
@@ -79,6 +99,9 @@ def is_block_device_removable(mount_path: str) -> bool:
 
 
 def main():
+    # === Initialize database on startup ===
+    init_db()
+
     args = parse_args()
     usb_mount = find_usb_mount()
     usb_script_mount = detect_usb_root_from_script()
@@ -103,6 +126,17 @@ def main():
     log_path = os.path.join(os.path.dirname(__file__), "logs")
     os.makedirs(log_path, exist_ok=True)
 
+    # Non-interactive mode (for sidecar/API usage)
+    if args.scan:
+        print(f"Operating on target mount: {target}\n")
+        scan_target(target)
+        return
+    if args.monitor:
+        print(f"Operating on target mount: {target}\n")
+        start_monitoring(target, log_path)
+        return
+
+    # Interactive mode
     print(f"Operating on target mount: {target}\n")
     print("Choose an action:")
     print("1. Run a one-time scan")
