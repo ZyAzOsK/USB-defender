@@ -16,7 +16,7 @@ from watcher import start_monitoring
 
 
 def find_usb_mount():
-    """Auto-detect USB mount point on Linux."""
+    """Auto-detect USB mount point on Linux, prioritizing removable drives."""
     try:
         username = os.getlogin()
     except OSError:
@@ -24,13 +24,21 @@ def find_usb_mount():
 
     possible_paths = [f"/run/media/{username}", f"/media/{username}"]
 
+    # Keep track of the first mount we find, in case we can't determine removability
+    fallback_mount = None
+
     for path in possible_paths:
         if os.path.exists(path):
             for device in os.listdir(path):
                 mount_path = os.path.join(path, device)
                 if os.path.ismount(mount_path):
-                    return mount_path
-    return None
+                    # Check if it's actually removable (e.g. skip Windows-SSD)
+                    if is_block_device_removable(mount_path):
+                        return mount_path
+                    if fallback_mount is None:
+                        fallback_mount = mount_path
+                        
+    return fallback_mount
 
 
 def get_mount_root_of_path(p: Path) -> Path:

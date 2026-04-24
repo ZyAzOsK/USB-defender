@@ -15,6 +15,7 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 from signatures import match_file
 from threat_intel import enrich_tag
 from logger import log_event
+from quarantine import quarantine_file
 
 # Max parallel scan workers
 MAX_WORKERS = 4
@@ -39,6 +40,12 @@ def _scan_single_file(file_path, target_path):
             infos.append(info)
             status_parts.append(f"⚠️  {info['category']} (Severity {info['severity']})")
             log_event(event_type="Scan", file_path=file_path, info=info)
+            
+            # Auto-quarantine during scan if the file still exists
+            if os.path.exists(file_path):
+                quarantine_dir = os.path.join(target_path, "quarantine")
+                quarantine_file(file_path, info, quarantine_dir)
+                
         status = " | ".join(status_parts)
         return {"rel_path": rel_path, "status": status, "detected": True, "infos": infos}
 
