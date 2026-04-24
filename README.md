@@ -1,232 +1,93 @@
-# USB-defender - under construction 🚧
-
 # USB-Defender
 
-*A portable USB security assistant for real-time malware detection, quarantine, and analysis.*
+*A cross-platform security ecosystem for real-time USB malware detection, quarantine, AI-powered analysis, and beautiful visualization.*
 
-USB-Defender is a cross-platform security tool designed to run **from a USB drive or from the host machine**.
-It monitors USB activity in real time, scans files using hash + heuristic signatures, and automatically **quarantines** dangerous files.
-
-Built for **Linux (tested on Arch Linux)** and works on Windows where Python + watchdog are available.
-
----
-
-# Features (Completed up to Phase 8)
-
-### ✔ **1. Automatic USB Target Detection**
-
-When launched, USB-Defender automatically detects the USB mount point to operate on.
-
-### ✔ **2. One-Time Recursive Scanner**
-
-Searches every file inside the USB:
-
-* Clean
-* Suspicious (patterns)
-* Known malware (SHA256)
-
-### ✔ **3. Real-Time Monitoring (Watchdog)**
-
-Monitors the USB drive for:
-
-* CREATED
-* MODIFIED
-* DELETED
-* MOVED
-
-Every event is scanned + enriched with threat intelligence.
-
-### ✔ **4. Signature-Based Detection**
-
-* SHA256 known malware hashes
-* `signatures.json` is auto-generated and updateable
-
-### ✔ **5. Heuristic Pattern Detection**
-
-Detects malicious indicators:
-
-* `<script>powershell`
-* `cmd.exe`
-* base64 payload strings
-* risky Python code (`subprocess`, `exec`, etc.)
-
-### ✔ **6. Threat Intelligence Layer**
-
-Each finding is enriched with:
-
-* Severity (0–10)
-* Category (Malware / Script Injection / Code Exec / etc.)
-* Recommended action
-* Human-readable description
-
-### ✔ **7. Logging System**
-
-Logs go into:
-
-* `app/usb_defender.db` (SQLite)
-* `app/logs/activity.log` (text log)
-
-### ✔ **8. Automatic Quarantine System**
-
-High-severity threats (≥8) are:
-
-* moved to `/USB/quarantine/UUID.qfile`
-* metadata stored as `UUID.meta.json`
-* inserted into the `quarantine` table
-
-### ✔ **9. Quarantine Manager CLI**
-
-Includes:
-
-* List
-* Restore
-* Delete
-* Summary dashboard
-
-Examples:
-
-```bash
-python app/quarantine_manager.py --list
-python app/quarantine_manager.py --restore 3
-python app/quarantine_manager.py --delete 3
-python app/quarantine_manager.py --summary
-```
-
-### ✔ **10. Quarantine Summary (Phase 8)**
-
-`python app/quarantine_manager.py --summary` shows:
-
-* Total quarantined
-* Severity metrics
-* Today's & this week's quarantines
-* Top threat categories
-* Auto-writes: `app/quarantine_summary.json`
+USB-Defender protects you from malicious files hiding in USB drives. It comes in two parts:
+1. **The Web Dashboard (Command Center):** A sleek, modern GUI to view reports, monitor drives, and manage quarantined files.
+2. **The Portable Scanner:** A standalone, zero-dependency script that lives *on the USB drive itself*, protecting it on any untrusted machine it gets plugged into.
 
 ---
 
-# Architecture Overview
+## New in v2.0 (Phase 7 Completed)
 
-```
+### 1. The Portable USB Scanner (`usb_defender_portable.py`)
+A single-file Python script designed to reside directly on your USB drive. 
+- **Zero Dependencies:** Runs on standard Python libraries. No `pip install` required.
+- **Cross-Platform:** Works seamlessly on Windows, Linux, and macOS.
+- **Developer-Friendly Heuristics:** Requires 2+ malicious patterns to trigger, and automatically ignores `.git`, `node_modules`, and itself, virtually eliminating false positives on dev projects.
+
+### 2. Gemini AI Threat Verification
+When the heuristic engine flags a suspicious file, the portable scanner securely sends a snippet to the **Gemini 2.5 Flash** AI model.
+- **Smart Analysis:** The AI acts as a cybersecurity analyst, verifying if the script is actually malicious or a false positive (e.g., a standard npm script).
+- **Rate-Limit Resilient:** Built-in sequential scanning with exponential backoff ensures it runs flawlessly on the Gemini Free Tier.
+- **Robust Parsing:** Uses strict `application/json` output enforcing to prevent parsing errors.
+
+### 3. Safe XOR Quarantine & Restore
+High-severity threats are instantly neutralized using **Symmetric XOR Encryption**.
+- The original file is encrypted and saved alongside a `.meta.json` sidecar containing its original path and threat details.
+- **Restore via CLI:** Run `python3 usb_defender_portable.py --restore` directly on the USB drive to interactively browse and safely decrypt mistakenly quarantined files.
+
+### 4. The Web Dashboard (GUI)
+A beautiful, responsive web interface built with React and Vite.
+- **Dashboard Home:** View system status and threat metrics at a glance.
+- **Scanner UI:** Deploy the portable scanner to any connected USB drive with one click.
+- **Quarantine Manager:** Visually review AI explanations for quarantined files and restore them via the interface.
+
+---
+
+## Architecture Overview
+
+```text
 USB-Defender/
 │
-├── app/
-│   ├── main.py                 # CLI menu: scan or monitor
-│   ├── watcher.py              # Real-time filesystem monitor
-│   ├── scanner.py              # One-time recursive scanner
-│   ├── detector.py             # Hash + pattern detection engine
-│   ├── signatures.py           # JSON-based signature system
-│   ├── threat_intel.py         # Severity, category, description
-│   ├── quarantine.py           # Auto-quarantine logic
-│   ├── quarantine_manager.py   # List/restore/delete/summary
-│   ├── reporter.py             # Log viewer + CSV exporter
-│   ├── usb_defender.db         # SQLite database
-│   └── logs/
-│       └── activity.log        # Text log
+├── dashboard/                  # The Web Command Center (React/Vite)
+│   ├── src/components/         # UI Components (StatusCards, ThreatFeed, etc.)
+│   ├── src/pages/              # Dashboard, Monitor, Scanner, Quarantine
+│   └── package.json            # Node dependencies
 │
-└── signatures.json             # Auto-generated signature store
+├── portable/                   # The Portable USB Engine
+│   ├── usb_defender_portable.py # Zero-dependency scanner + AI verification
+│   ├── scan.sh                 # Linux/macOS launcher
+│   └── scan.bat                # Windows launcher
+│
+└── app/                        # (Legacy) Host-Side Background Watcher
+    ├── watcher.py              # Real-time filesystem monitor
+    ├── scanner.py              # Recursive scanner
+    └── quarantine.py           # Legacy quarantine logic
 ```
 
 ---
 
-# Usage Guide
+## Usage Guide
 
-## **Start the program**
+### 1. Using the Portable Scanner
+Copy `usb_defender_portable.py` to the root of your USB drive.
 
+**Scan the drive (Terminal/CMD):**
 ```bash
-python app/main.py
+python3 usb_defender_portable.py
 ```
 
-### Option 1 — One-time Scan
+**Scan using Gemini AI (Requires API Key):**
+```bash
+python3 usb_defender_portable.py --ai-key YOUR_GEMINI_API_KEY
+```
 
-Recursively scans all files on the USB.
+**Restore a Quarantined File:**
+```bash
+python3 usb_defender_portable.py --restore
+```
 
-### Option 2 — Real-Time Monitoring
-
-Watches for new/modified files and instantly scans them:
-
-* Prints detection results
-* Quarantines high-severity threats automatically
-* Logs everything to DB + text logs
+### 2. Running the Dashboard
+Start the web interface to view reports generated by the portable scanner.
+```bash
+cd dashboard
+npm install
+npm run dev
+```
+Open your browser to `http://localhost:5173`.
 
 ---
 
-# Reporter (Log Viewer)
-
-### Last N entries:
-
-```bash
-python app/reporter.py --limit 20
-```
-
-### Filter by event type:
-
-```bash
-python app/reporter.py --event CREATED
-```
-
-### Export logs to CSV:
-
-```bash
-python app/reporter.py --export
-```
-
----
-
-# Quarantine Manager
-
-### List all quarantined files:
-
-```bash
-python app/quarantine_manager.py --list
-```
-
-### Restore a quarantined file:
-
-```bash
-python app/quarantine_manager.py --restore <ID>
-```
-
-### Permanently delete:
-
-```bash
-python app/quarantine_manager.py --delete <ID>
-```
-
-### Show quarantine summary:
-
-```bash
-python app/quarantine_manager.py --summary
-```
-
----
-
-# Detection Pipeline
-
-```
-Filesystem Event
-     ↓
-detector.py
-    → hash matching
-    → heuristic scanning
-     ↓
-threat_intel.py (severity/category/action)
-     ↓
-watcher.py
-     ↓
-log_event() → SQLite + text log
-     ↓
-if severity >= 8 → quarantine.py
-```
-
----
-
-# Installation
-
-Install dependencies:
-
-```bash
-pip install watchdog tabulate
-```
-
----
-
+## Next Steps (Phase 8)
+- **Executable Deployment:** Compile `usb_defender_portable.py` using PyInstaller into native `.exe` and Linux binaries so target machines don't even need Python installed!
