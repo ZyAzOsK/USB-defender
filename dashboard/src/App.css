@@ -729,3 +729,108 @@ body {
 .text-sm { font-size: 12px; }
 .text-muted { color: var(--text-muted); }
 .w-full { width: 100%; }
+
+/* ─── Auto-Scan Toggle ─── */
+.autoscan-toggle {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  width: 100%;
+  padding: 10px 12px;
+  border: 1px solid var(--border-subtle);
+  border-radius: var(--radius-md);
+  background: var(--bg-glass);
+  cursor: pointer;
+  transition: all var(--transition-default);
+  font-family: var(--font-sans);
+  color: var(--text-secondary);
+}
+
+.autoscan-toggle:hover:not(:disabled) {
+  border-color: var(--border-default);
+  background: var(--bg-card-hover);
+}
+
+.autoscan-toggle:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+
+.autoscan-toggle.active {
+  border-color: rgba(16, 185, 129, 0.3);
+  background: rgba(16, 185, 129, 0.06);
+}
+
+.autoscan-toggle-icon {
+  width: 28px;
+  height: 28px;
+  border-radius: var(--radius-sm);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background: var(--bg-input);
+  color: var(--text-muted);
+  transition: all var(--transition-default);
+  flex-shrink: 0;
+}
+
+.autoscan-toggle.active .autoscan-toggle-icon {
+  background: rgba(16, 185, 129, 0.15);
+  color: var(--accent-emerald);
+  box-shadow: 0 0 8px rgba(16, 185, 129, 0.2);
+}
+
+.autoscan-toggle-label {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+}
+
+.autoscan-toggle-text {
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--text-primary);
+}
+
+.autoscan-toggle-status {
+  font-size: 10px;
+  color: var(--text-muted);
+}
+
+.autoscan-toggle.active .autoscan-toggle-status {
+  color: var(--accent-emerald);
+}
+
+.autoscan-toggle-switch {
+  width: 36px;
+  height: 20px;
+  border-radius: 10px;
+  background: var(--bg-input);
+  border: 1px solid var(--border-default);
+  position: relative;
+  transition: all var(--transition-default);
+  flex-shrink: 0;
+}
+
+.autoscan-toggle-switch.on {
+  background: var(--accent-emerald);
+  border-color: var(--accent-emerald);
+  box-shadow: 0 0 10px rgba(16, 185, 129, 0.3);
+}
+
+.autoscan-toggle-knob {
+  width: 14px;
+  height: 14px;
+  border-radius: 50%;
+  background: white;
+  position: absolute;
+  top: 2px;
+  left: 2px;
+  transition: transform var(--transition-default);
+  box-shadow: 0 1px 3px rgba(0, 0, 0, 0.3);
+}
+
+.autoscan-toggle-switch.on .autoscan-toggle-knob {
+  transform: translateX(16px);
+}

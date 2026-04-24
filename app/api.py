@@ -17,6 +17,7 @@ import sys
 import json
 import asyncio
 import argparse
+import platform
 import threading
 from pathlib import Path
 from datetime import datetime
@@ -36,15 +37,18 @@ from signatures import load_signatures, reload_signatures
 from threat_intel import enrich_tag
 from quarantine_manager import list_quarantined, restore_quarantined, delete_quarantined
 from quarantine import update_summary, SUMMARY_FILE
+from usb_detector import USBDetector
 
 # ==============================
 # App Lifecycle
 # ==============================
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    """Initialize DB on startup."""
+    """Initialize DB on startup, start auto-scan detector."""
     init_db()
     yield
+    # Shutdown: stop auto-scanner if running
+    _autoscan_stop()
 
 app = FastAPI(
     title="USB Defender API",
@@ -70,6 +74,67 @@ _monitor_stop_event = threading.Event()
 _ws_clients: list[WebSocket] = []
 _scan_jobs: dict[str, dict] = {}
 
+# Auto-scan state
+_usb_detector: USBDetector | None = None
+_autoscan_enabled = False
+_autoscan_history: list[dict] = []  # recent auto-scan results
+
+
+def _on_usb_inserted(mount_path: str):
+    """Callback fired by USBDetector when a USB drive is inserted."""
+    global _autoscan_history
+    print(f"🔌 USB INSERTED: {mount_path} — auto-scanning...")
+
+    try:
+        result = scan_target(mount_path)
+        entry = {
+            "timestamp": datetime.now().isoformat(),
+            "mount_path": mount_path,
+            "summary": result,
+            "status": "completed",
+        }
+    except Exception as e:
+        entry = {
+            "timestamp": datetime.now().isoformat(),
+            "mount_path": mount_path,
+            "summary": {"detected": 0, "clean": 0},
+            "status": f"error: {e}",
+        }
+
+    _autoscan_history = [entry] + _autoscan_history[:19]  # keep last 20
+
+    # Broadcast to all connected WebSocket clients
+    _broadcast_autoscan_event(entry)
+    print(f"✅ Auto-scan complete: {entry['summary']}")
+
+
+def _broadcast_autoscan_event(entry: dict):
+    """Send auto-scan result to all connected WebSocket clients."""
+    import asyncio
+    for ws in list(_ws_clients):
+        try:
+            loop = asyncio.get_event_loop()
+            if loop.is_running():
+                asyncio.ensure_future(ws.send_json({
+                    "type": "autoscan",
+                    "data": entry,
+                }))
+        except Exception:
+            pass
+
+
+def _on_usb_removed(dev_path: str):
+    """Callback fired when a USB drive is removed."""
+    print(f"⏏️  USB REMOVED: {dev_path}")
+
+
+def _autoscan_stop():
+    """Stop the auto-scan detector if running."""
+    global _usb_detector, _autoscan_enabled
+    if _usb_detector and _usb_detector.running:
+        _usb_detector.stop()
+    _autoscan_enabled = False
+
 
 # ==============================
 # Health & Status
@@ -86,6 +151,48 @@ async def get_status():
         "usb_path": usb,
         "db_path": str(DB_FILE),
         "monitoring_active": _monitor_task is not None and _monitor_task.is_alive(),
+        "autoscan_enabled": _autoscan_enabled,
+        "autoscan_detector_running": _usb_detector is not None and _usb_detector.running,
+        "platform": platform.system(),
+    }
+
+# ==============================
+# Auto-Scan (USB Insertion Detection)
+# ==============================
+@app.post("/api/autoscan/enable")
+async def enable_autoscan():
+    """Enable automatic scanning on USB insertion."""
+    global _usb_detector, _autoscan_enabled
+
+    if _autoscan_enabled and _usb_detector and _usb_detector.running:
+        return {"status": "already_enabled", "message": "Auto-scan is already active."}
+
+    _usb_detector = USBDetector(on_insert=_on_usb_inserted, on_remove=_on_usb_removed)
+    _usb_detector.start()
+    _autoscan_enabled = True
+
+    return {
+        "status": "enabled",
+        "platform": platform.system(),
+        "message": f"Auto-scan enabled on {platform.system()}. USB insertions will trigger scans automatically.",
+    }
+
+
+@app.post("/api/autoscan/disable")
+async def disable_autoscan():
+    """Disable automatic scanning on USB insertion."""
+    _autoscan_stop()
+    return {"status": "disabled", "message": "Auto-scan disabled."}
+
+
+@app.get("/api/autoscan/status")
+async def autoscan_status():
+    """Get current auto-scan status and recent history."""
+    return {
+        "enabled": _autoscan_enabled,
+        "detector_running": _usb_detector is not None and _usb_detector.running,
+        "platform": platform.system(),
+        "history": _autoscan_history,
     }
 
 

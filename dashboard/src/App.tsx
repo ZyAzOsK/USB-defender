@@ -2,7 +2,7 @@ import { useEffect, useState } from "react";
 import { BrowserRouter, Routes, Route, NavLink } from "react-router-dom";
 import {
   LayoutDashboard, Radio, Search, Archive,
-  FileText, Shield,
+  FileText, Shield, Zap, ZapOff,
 } from "lucide-react";
 import "./App.css";
 
@@ -16,6 +16,8 @@ import { api } from "./api";
 export default function App() {
   const [backendOnline, setBackendOnline] = useState(false);
   const [usbPath, setUsbPath] = useState<string | null>(null);
+  const [autoscanEnabled, setAutoscanEnabled] = useState(false);
+  const [autoscanToggling, setAutoscanToggling] = useState(false);
 
   useEffect(() => {
     checkBackend();
@@ -28,9 +30,28 @@ export default function App() {
       const status = await api.status();
       setBackendOnline(true);
       setUsbPath(status.usb_path);
+      setAutoscanEnabled(status.autoscan_enabled);
     } catch {
       setBackendOnline(false);
       setUsbPath(null);
+      setAutoscanEnabled(false);
+    }
+  }
+
+  async function toggleAutoscan() {
+    setAutoscanToggling(true);
+    try {
+      if (autoscanEnabled) {
+        await api.autoscanDisable();
+        setAutoscanEnabled(false);
+      } else {
+        await api.autoscanEnable();
+        setAutoscanEnabled(true);
+      }
+    } catch (e) {
+      console.error("Auto-scan toggle failed:", e);
+    } finally {
+      setAutoscanToggling(false);
     }
   }
 
@@ -92,6 +113,29 @@ export default function App() {
               Activity Logs
             </NavLink>
           </nav>
+
+          {/* Auto-scan toggle */}
+          <div className="sidebar-status" style={{ marginBottom: 0 }}>
+            <button
+              className={`autoscan-toggle ${autoscanEnabled ? "active" : ""}`}
+              onClick={toggleAutoscan}
+              disabled={!backendOnline || autoscanToggling}
+              title={autoscanEnabled ? "Disable auto-scan on USB insert" : "Enable auto-scan on USB insert"}
+            >
+              <div className="autoscan-toggle-icon">
+                {autoscanEnabled ? <Zap size={14} /> : <ZapOff size={14} />}
+              </div>
+              <div className="autoscan-toggle-label">
+                <span className="autoscan-toggle-text">Auto-Scan</span>
+                <span className="autoscan-toggle-status">
+                  {autoscanToggling ? "Toggling..." : autoscanEnabled ? "Active" : "Disabled"}
+                </span>
+              </div>
+              <div className={`autoscan-toggle-switch ${autoscanEnabled ? "on" : "off"}`}>
+                <div className="autoscan-toggle-knob" />
+              </div>
+            </button>
+          </div>
 
           {/* Status footer */}
           <div className="sidebar-status">

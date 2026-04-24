@@ -15,6 +15,9 @@ export interface StatusResponse {
   usb_path: string | null;
   db_path: string;
   monitoring_active: boolean;
+  autoscan_enabled: boolean;
+  autoscan_detector_running: boolean;
+  platform: string;
 }
 
 export interface LogEntry {
@@ -147,6 +150,32 @@ export const api = {
 
   /** Get current signatures */
   signatures: () => fetchJSON<any>("/api/signatures"),
+
+  /** Enable auto-scan on USB insertion */
+  autoscanEnable: () =>
+    fetchJSON<{ status: string; message: string }>("/api/autoscan/enable", {
+      method: "POST",
+    }),
+
+  /** Disable auto-scan */
+  autoscanDisable: () =>
+    fetchJSON<{ status: string; message: string }>("/api/autoscan/disable", {
+      method: "POST",
+    }),
+
+  /** Get auto-scan status and history */
+  autoscanStatus: () =>
+    fetchJSON<{
+      enabled: boolean;
+      detector_running: boolean;
+      platform: string;
+      history: {
+        timestamp: string;
+        mount_path: string;
+        summary: { detected: number; clean: number };
+        status: string;
+      }[];
+    }>("/api/autoscan/status"),
 };
 
 // ─── WebSocket for real-time monitor ─────────────────────────
