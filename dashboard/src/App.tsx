@@ -1,51 +1,129 @@
-import { useState } from "react";
-import reactLogo from "./assets/react.svg";
-import { invoke } from "@tauri-apps/api/core";
+import { useEffect, useState } from "react";
+import { BrowserRouter, Routes, Route, NavLink } from "react-router-dom";
+import {
+  LayoutDashboard, Radio, Search, Archive,
+  FileText, Shield,
+} from "lucide-react";
 import "./App.css";
 
-function App() {
-  const [greetMsg, setGreetMsg] = useState("");
-  const [name, setName] = useState("");
+import Dashboard from "./pages/Dashboard";
+import Monitor from "./pages/Monitor";
+import Scanner from "./pages/Scanner";
+import Quarantine from "./pages/Quarantine";
+import Logs from "./pages/Logs";
+import { api } from "./api";
 
-  async function greet() {
-    // Learn more about Tauri commands at https://tauri.app/develop/calling-rust/
-    setGreetMsg(await invoke("greet", { name }));
+export default function App() {
+  const [backendOnline, setBackendOnline] = useState(false);
+  const [usbPath, setUsbPath] = useState<string | null>(null);
+
+  useEffect(() => {
+    checkBackend();
+    const interval = setInterval(checkBackend, 4000);
+    return () => clearInterval(interval);
+  }, []);
+
+  async function checkBackend() {
+    try {
+      const status = await api.status();
+      setBackendOnline(true);
+      setUsbPath(status.usb_path);
+    } catch {
+      setBackendOnline(false);
+      setUsbPath(null);
+    }
   }
 
   return (
-    <main className="container">
-      <h1>Welcome to Tauri + React</h1>
+    <BrowserRouter>
+      <div className="app-layout">
+        {/* ── Sidebar ── */}
+        <aside className="sidebar">
+          <div className="sidebar-header">
+            <div className="sidebar-logo">
+              <Shield size={20} />
+            </div>
+            <div className="sidebar-brand">
+              <h1>USB Defender</h1>
+              <span>v1.0.0</span>
+            </div>
+          </div>
 
-      <div className="row">
-        <a href="https://vite.dev" target="_blank">
-          <img src="/vite.svg" className="logo vite" alt="Vite logo" />
-        </a>
-        <a href="https://tauri.app" target="_blank">
-          <img src="/tauri.svg" className="logo tauri" alt="Tauri logo" />
-        </a>
-        <a href="https://react.dev" target="_blank">
-          <img src={reactLogo} className="logo react" alt="React logo" />
-        </a>
+          <nav className="sidebar-nav">
+            <div className="nav-section-title">Overview</div>
+            <NavLink
+              to="/"
+              end
+              className={({ isActive }) => `nav-item ${isActive ? "active" : ""}`}
+            >
+              <LayoutDashboard size={18} />
+              Dashboard
+            </NavLink>
+
+            <div className="nav-section-title">Operations</div>
+            <NavLink
+              to="/monitor"
+              className={({ isActive }) => `nav-item ${isActive ? "active" : ""}`}
+            >
+              <Radio size={18} />
+              Live Monitor
+            </NavLink>
+            <NavLink
+              to="/scanner"
+              className={({ isActive }) => `nav-item ${isActive ? "active" : ""}`}
+            >
+              <Search size={18} />
+              Scanner
+            </NavLink>
+
+            <div className="nav-section-title">Security</div>
+            <NavLink
+              to="/quarantine"
+              className={({ isActive }) => `nav-item ${isActive ? "active" : ""}`}
+            >
+              <Archive size={18} />
+              Quarantine
+            </NavLink>
+            <NavLink
+              to="/logs"
+              className={({ isActive }) => `nav-item ${isActive ? "active" : ""}`}
+            >
+              <FileText size={18} />
+              Activity Logs
+            </NavLink>
+          </nav>
+
+          {/* Status footer */}
+          <div className="sidebar-status">
+            <div className="status-row">
+              <div className={`status-dot ${backendOnline ? "online" : "offline"}`} />
+              <span className="text-sm" style={{ color: "var(--text-secondary)" }}>
+                {backendOnline ? "Engine Online" : "Engine Offline"}
+              </span>
+            </div>
+            {usbPath && (
+              <div
+                className="text-sm text-muted text-mono"
+                style={{ marginTop: 6, fontSize: 11, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}
+                title={usbPath}
+              >
+                USB: {usbPath.split("/").pop()}
+              </div>
+            )}
+          </div>
+        </aside>
+
+        {/* ── Main content ── */}
+        <main className="main-content">
+          <Routes>
+            <Route path="/" element={<Dashboard />} />
+            <Route path="/monitor" element={<Monitor />} />
+            <Route path="/scanner" element={<Scanner />} />
+            <Route path="/quarantine" element={<Quarantine />} />
+            <Route path="/logs" element={<Logs />} />
+          </Routes>
+        </main>
       </div>
-      <p>Click on the Tauri, Vite, and React logos to learn more.</p>
-
-      <form
-        className="row"
-        onSubmit={(e) => {
-          e.preventDefault();
-          greet();
-        }}
-      >
-        <input
-          id="greet-input"
-          onChange={(e) => setName(e.currentTarget.value)}
-          placeholder="Enter a name..."
-        />
-        <button type="submit">Greet</button>
-      </form>
-      <p>{greetMsg}</p>
-    </main>
+    </BrowserRouter>
   );
 }
-
-export default App;
