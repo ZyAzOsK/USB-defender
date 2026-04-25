@@ -1,0 +1,79 @@
+{
+    "malware_hashes": [
+        "275a021bbfb6489e54d471899f7db9d1663fc695ec2fe2a2c4538aabf651fd0f"
+    ],
+    "rules": [
+        {
+            "name": "Suspicious_HTML_Executable",
+            "patterns": [
+                "<script>",
+                "powershell",
+                "cmd.exe",
+                "base64,"
+            ],
+            "extensions": [
+                ".html",
+                ".htm",
+                ".txt"
+            ]
+        },
+        {
+            "name": "Potential_Malicious_Python",
+            "patterns": [
+                "import os",
+                "exec(",
+                "subprocess",
+                "socket"
+            ],
+            "extensions": [
+                ".py"
+            ]
+        },
+        {
+            "name": "Suspicious_Batch_Script",
+            "patterns": [
+                "del /f",
+                "del /s",
+                "del /q",
+                "c:\\windows",
+                "format ",
+                "net user",
+                "reg add",
+                "reg delete",
+                "taskkill"
+            ],
+            "extensions": [
+                ".bat",
+                ".cmd"
+            ]
+        },
+        {
+            "name": "Suspicious_PowerShell_Script",
+            "patterns": [
+                "invoke-webrequest",
+                "iex",
+                "downloadstring",
+                "-encodedcommand",
+                "invoke-expression",
+                "new-object net.webclient"
+            ],
+            "extensions": [
+                ".ps1"
+            ]
+        },
+        {
+            "name": "Suspicious_VBS_Script",
+            "patterns": [
+                "wscript.shell",
+                "createobject",
+                "activexobject",
+                "shell.application"
+            ],
+            "extensions": [
+                ".vbs",
+                ".js",
+                ".wsf"
+            ]
+        }
+    ]
+}

@@ -11,8 +11,7 @@ env/
 venv/
 
 # USB Defender generated files
-app/signatures.json
-signatures.json
+/signatures.json
 app/logs/
 *.db
 quarantine/
