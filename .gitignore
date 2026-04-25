@@ -49,3 +49,14 @@ dashboard/src-tauri/sidecars/usb-defender-*
 ws_test.py
 claude_briefing.md
 
+# PyInstaller
+*.spec
+portable/build/
+portable/dist/
+
+# Tauri build output
+dashboard/src-tauri/target/
+
+# Node
+node_modules/
+

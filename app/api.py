@@ -197,6 +197,54 @@ async def autoscan_status():
 
 
 # ==============================
+# Portable USB Deployment
+# ==============================
+from pydantic import BaseModel
+import shutil
+
+class ArmUSBRequest(BaseModel):
+    usb_path: str
+
+@app.post("/api/arm-usb")
+async def arm_usb(req: ArmUSBRequest):
+    """Deploy the portable scanner binary to the specified USB drive root."""
+    import platform
+    target_dir = Path(req.usb_path)
+    if not target_dir.exists() or not target_dir.is_dir():
+        raise HTTPException(status_code=400, detail="Invalid USB path")
+
+    # Determine which binary to copy based on host OS
+    sys_name = platform.system().lower()
+    binary_name = "usb-defender-linux"
+    if sys_name == "windows":
+        binary_name = "USBDefender.exe"
+    elif sys_name == "darwin":
+        binary_name = "usb-defender-macos"
+
+    # Assume we are running from project root or inside Tauri bundle
+    project_root = Path(__file__).resolve().parent.parent
+    dist_dir = project_root / "portable" / "dist"
+    source_binary = dist_dir / binary_name
+
+    if not source_binary.exists():
+        raise HTTPException(
+            status_code=500, 
+            detail=f"Portable binary not found at {source_binary}. Please compile it first using build_portable.py."
+        )
+
+    dest_binary = target_dir / binary_name
+    try:
+        shutil.copy2(source_binary, dest_binary)
+        # Ensure executable permissions on Linux/Mac
+        if sys_name != "windows":
+            dest_binary.chmod(0o755)
+            
+        return {"status": "success", "message": f"Successfully deployed {binary_name} to {target_dir}"}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Failed to copy binary: {str(e)}")
+
+
+# ==============================
 # Scan Endpoints
 # ==============================
 @app.post("/api/scan")

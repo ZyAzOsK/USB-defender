@@ -1,0 +1,169 @@
+name: 'Build & Release USB Defender'
+
+on:
+  push:
+    tags:
+      - 'v*'
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  # ──────────────────────────────────────────────
+  # Build the Portable Scanner binaries
+  # ──────────────────────────────────────────────
+  build-portable:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-latest
+            name: usb-defender-linux
+          - os: windows-latest
+            name: USBDefender.exe
+          - os: macos-latest
+            name: usb-defender-macos
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: Install PyInstaller
+        run: pip install pyinstaller
+
+      - name: Build portable scanner
+        run: |
+          pyinstaller --onefile --clean --noconfirm \
+            --name "${{ matrix.name }}" \
+            --distpath portable/dist \
+            portable/usb_defender_portable.py
+        shell: bash
+
+      - name: Upload portable artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: portable-${{ matrix.os }}
+          path: portable/dist/${{ matrix.name }}*
+
+  # ──────────────────────────────────────────────
+  # Build the Desktop App (Tauri + Python sidecar)
+  # ──────────────────────────────────────────────
+  build-desktop:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-latest
+            target-triple: x86_64-unknown-linux-gnu
+          - os: windows-latest
+            target-triple: x86_64-pc-windows-msvc
+          - os: macos-latest
+            target-triple: aarch64-apple-darwin
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: Install Python dependencies
+        run: |
+          pip install pyinstaller
+          pip install -r requirements.txt
+
+      - name: Build Python API sidecar
+        run: |
+          mkdir -p dashboard/src-tauri/sidecars
+          pyinstaller --onefile --clean --noconfirm \
+            --name "usb-defender-api" \
+            --distpath dashboard/src-tauri/sidecars \
+            --add-data "app/signatures.json:." \
+            --hidden-import uvicorn.logging \
+            --hidden-import uvicorn.loops \
+            --hidden-import uvicorn.loops.auto \
+            --hidden-import uvicorn.protocols \
+            --hidden-import uvicorn.protocols.http \
+            --hidden-import uvicorn.protocols.http.auto \
+            --hidden-import uvicorn.protocols.websockets \
+            --hidden-import uvicorn.protocols.websockets.auto \
+            --hidden-import uvicorn.lifespan \
+            --hidden-import uvicorn.lifespan.on \
+            app/api.py
+        shell: bash
+
+      - name: Rename sidecar with target triple
+        run: |
+          cd dashboard/src-tauri/sidecars
+          if [ -f "usb-defender-api" ]; then
+            cp "usb-defender-api" "usb-defender-api-${{ matrix.target-triple }}"
+          elif [ -f "usb-defender-api.exe" ]; then
+            cp "usb-defender-api.exe" "usb-defender-api-${{ matrix.target-triple }}.exe"
+          fi
+        shell: bash
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+
+      - name: Install frontend dependencies
+        run: cd dashboard && npm ci
+
+      - name: Install Linux dependencies
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            libwebkit2gtk-4.1-dev libgtk-3-dev libappindicator3-dev \
+            librsvg2-dev patchelf libglib2.0-dev
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Build Tauri app
+        uses: tauri-apps/tauri-action@v0
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        with:
+          projectPath: dashboard
+
+      - name: Upload desktop artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: desktop-${{ matrix.os }}
+          path: |
+            dashboard/src-tauri/target/release/bundle/**/*.deb
+            dashboard/src-tauri/target/release/bundle/**/*.rpm
+            dashboard/src-tauri/target/release/bundle/**/*.AppImage
+            dashboard/src-tauri/target/release/bundle/**/*.msi
+            dashboard/src-tauri/target/release/bundle/**/*.dmg
+
+  # ──────────────────────────────────────────────
+  # Create a GitHub Release with all artifacts
+  # ──────────────────────────────────────────────
+  release:
+    needs: [build-portable, build-desktop]
+    runs-on: ubuntu-latest
+    if: startsWith(github.ref, 'refs/tags/v')
+    steps:
+      - name: Download all artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+
+      - name: Create Release
+        uses: softprops/action-gh-release@v2
+        with:
+          draft: true
+          generate_release_notes: true
+          files: |
+            artifacts/**/*
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

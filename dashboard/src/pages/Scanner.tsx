@@ -5,14 +5,17 @@ import { api, ScanResult } from "../api";
 export default function Scanner() {
   const [path, setPath] = useState("");
   const [scanning, setScanning] = useState(false);
+  const [arming, setArming] = useState(false);
   const [result, setResult] = useState<ScanResult | null>(null);
   const [error, setError] = useState("");
+  const [successMsg, setSuccessMsg] = useState("");
 
   async function runScan() {
     if (!path.trim()) return;
     setScanning(true);
     setResult(null);
     setError("");
+    setSuccessMsg("");
 
     try {
       const data = await api.scan(path);
@@ -24,6 +27,22 @@ export default function Scanner() {
     }
   }
 
+  async function armUsb() {
+    if (!path.trim()) return;
+    setArming(true);
+    setError("");
+    setSuccessMsg("");
+
+    try {
+      const res = await api.armUsb(path);
+      setSuccessMsg(res.message);
+    } catch (e: any) {
+      setError(e.message || "Failed to arm USB");
+    } finally {
+      setArming(false);
+    }
+  }
+
   const total = result ? result.summary.detected + result.summary.clean : 0;
   const pct = total > 0 ? Math.round((result!.summary.clean / total) * 100) : 0;
 
@@ -31,7 +50,7 @@ export default function Scanner() {
     <>
       <div className="page-header">
         <h2>Scanner</h2>
-        <p>On-demand recursive file scanning</p>
+        <p>On-demand recursive file scanning and portable deployment</p>
       </div>
 
       <div className="page-body">
@@ -47,19 +66,31 @@ export default function Scanner() {
                 placeholder="/run/media/user/USB_DRIVE"
                 value={path}
                 onChange={(e) => setPath(e.target.value)}
-                disabled={scanning}
+                disabled={scanning || arming}
                 onKeyDown={(e) => e.key === "Enter" && runScan()}
               />
             </div>
-            <button
-              className="btn btn-primary"
-              onClick={runScan}
-              disabled={scanning || !path.trim()}
-              style={{ marginTop: 20 }}
-            >
-              {scanning ? <Loader size={16} className="spinner" /> : <Search size={16} />}
-              {scanning ? "Scanning..." : "Start Scan"}
-            </button>
+            
+            <div style={{ marginTop: 20, display: "flex", gap: "12px" }}>
+              <button
+                className="btn btn-secondary"
+                onClick={armUsb}
+                disabled={arming || scanning || !path.trim()}
+                title="Copy the standalone portable scanner to this USB drive"
+              >
+                {arming ? <Loader size={16} className="spinner" /> : <ShieldCheck size={16} />}
+                {arming ? "Deploying..." : "Arm USB"}
+              </button>
+
+              <button
+                className="btn btn-primary"
+                onClick={runScan}
+                disabled={scanning || arming || !path.trim()}
+              >
+                {scanning ? <Loader size={16} className="spinner" /> : <Search size={16} />}
+                {scanning ? "Scanning..." : "Start Scan"}
+              </button>
+            </div>
           </div>
 
           {scanning && (
@@ -74,6 +105,15 @@ export default function Scanner() {
             <div className="flex items-center gap-12">
               <ShieldAlert size={20} style={{ color: "var(--severity-critical)" }} />
               <span>{error}</span>
+            </div>
+          </div>
+        )}
+
+        {successMsg && (
+          <div className="card mb-16" style={{ borderColor: "var(--severity-clean)", borderLeftWidth: 3 }}>
+            <div className="flex items-center gap-12">
+              <ShieldCheck size={20} style={{ color: "var(--severity-clean)" }} />
+              <span>{successMsg}</span>
             </div>
           </div>
         )}

@@ -16,7 +16,7 @@ async fn start_backend(app: tauri::AppHandle) -> Result<String, String> {
     let shell = app.shell();
 
     // Spawn the sidecar — looks for "usb-defender-api" binary in the sidecar bundle
-    let output = shell
+    let _output = shell
         .sidecar("usb-defender-api")
         .map_err(|e| format!("Failed to create sidecar command: {}", e))?
         .args(["--host", "127.0.0.1", "--port", "8642"])

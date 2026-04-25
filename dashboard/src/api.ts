@@ -176,6 +176,14 @@ export const api = {
         status: string;
       }[];
     }>("/api/autoscan/status"),
+
+  /** Deploy portable scanner to USB */
+  armUsb: (usbPath: string) =>
+    fetchJSON<{ status: string; message: string }>("/api/arm-usb", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ usb_path: usbPath })
+    }),
 };
 
 // ─── WebSocket for real-time monitor ─────────────────────────

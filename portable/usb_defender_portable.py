@@ -157,7 +157,12 @@ def compute_sha256(file_path):
 
 def get_usb_root():
     """Detect USB root based on where this script is running from."""
-    script_path = Path(__file__).resolve()
+    if getattr(sys, 'frozen', False):
+        # Running as PyInstaller executable
+        script_path = Path(sys.executable).resolve()
+    else:
+        # Running as a normal Python script
+        script_path = Path(__file__).resolve()
     
     if platform.system() == "Windows":
         # On Windows, the drive letter is the root (e.g. E:\)
@@ -395,8 +400,7 @@ def generate_report(results, target_path, scan_time, report_path):
 def print_banner():
     """Print the startup banner."""
     C = Colors
-    print(f"""
-{C.CYAN}{C.BOLD}╔═══════════════════════════════════════════════════════════╗
+    banner = f"""{C.CYAN}{C.BOLD}╔═══════════════════════════════════════════════════════════╗
 ║                                                           ║
 ║   ██╗   ██╗███████╗██████╗     ██████╗ ███████╗███████╗   ║
 ║   ██║   ██║██╔════╝██╔══██╗    ██╔══██╗██╔════╝██╔════╝   ║
@@ -405,10 +409,11 @@ def print_banner():
 ║   ╚██████╔╝███████║██████╔╝    ██████╔╝███████╗██║        ║
 ║    ╚═════╝ ╚══════╝╚═════╝     ╚═════╝ ╚══════╝╚═╝        ║
 ║                                                           ║
-║          P O R T A B L E   S C A N N E R                  ║
-║                    v{VERSION}                                ║
+║{"P O R T A B L E   S C A N N E R".center(59)}║
+║{f"v{VERSION}".center(59)}║
 ╚═══════════════════════════════════════════════════════════╝{C.RESET}
-""")
+"""
+    print(banner)
 
 
 def print_progress(current, total, bar_length=40):
@@ -693,8 +698,8 @@ def gemini_analyze(file_path, tags, api_key, max_retries=3):
         f"File: {filename}\n"
         f"Heuristic tags: {', '.join(tags)}\n"
         f"File content (first 200 lines):\n```\n{snippet}\n```\n\n"
-        f"Is this file actually malicious or is it a false positive (e.g. a normal "
-        f"development file, npm package, or legitimate script)?\n"
+        f"Is this file actually malicious or is it a false positive?\n"
+        f"Keep the reason VERY short, under 20 words max.\n"
         f"Respond with JSON only: "
         f'{{"is_threat": true, "confidence": "high", "reason": "explanation"}}'
     )
@@ -703,7 +708,7 @@ def gemini_analyze(file_path, tags, api_key, max_retries=3):
         "contents": [{"parts": [{"text": prompt}]}],
         "generationConfig": {
             "temperature": 0.1,
-            "maxOutputTokens": 1000,
+            "maxOutputTokens": 100,
             "responseMimeType": "application/json",
         }
     }).encode("utf-8")
@@ -733,22 +738,22 @@ def gemini_analyze(file_path, tags, api_key, max_retries=3):
                     clean = re.sub(r'[`\n]', ' ', text).strip()[:200]
                     return True, clean if clean else "AI returned unparseable response", "medium"
 
-            return (
-                analysis.get("is_threat", True),
-                analysis.get("reason", "No explanation"),
-                analysis.get("confidence", "medium"),
-            )
+            is_threat = analysis.get("is_threat", True)
+            reason = str(analysis.get("reason", "Malicious patterns found."))[:150]
+            confidence = str(analysis.get("confidence", "high"))
+            return is_threat, reason, confidence
 
         except urllib.error.HTTPError as e:
-            if e.code == 429 and attempt < max_retries - 1:
-                wait = (attempt + 1) * 5  # 5s, 10s, 15s
-                time.sleep(wait)
+            if e.code == 403:
+                return True, "API Key invalid or rate limited (403)", "medium"
+            if e.code == 429:
+                time.sleep((attempt + 1) * 5)
                 continue
             return True, f"API error (HTTP {e.code})", "low"
         except Exception as e:
-            return True, f"AI unavailable ({type(e).__name__})", "low"
+            time.sleep((attempt + 1) * 2)
 
-    return True, "AI rate limited after retries", "low"
+    return True, "AI analysis failed after retries", "low"
 
 
 def validate_gemini_key(api_key):
@@ -812,6 +817,26 @@ def main():
         print(f"\n  {C.RED}ERROR: Target path does not exist: {target}{C.RESET}")
         sys.exit(1)
 
+    # Interactive Menu if no arguments provided
+    if len(sys.argv) == 1 or (getattr(sys, 'frozen', False) and len(sys.argv) <= 1):
+        print(f"  {C.BOLD}Target USB:{C.RESET} {target}\n")
+        print("  Please choose an action:")
+        print("    [1] Scan & Quarantine (Default)")
+        print("    [2] Report Only (Do not quarantine)")
+        print("    [3] Restore Quarantined Files")
+        choice = input(f"\n  {C.BOLD}Enter choice [1/2/3]: {C.RESET}").strip()
+        
+        if choice == '3':
+            args.restore = True
+        elif choice == '2':
+            args.no_quarantine = True
+
+        if not args.restore:
+            ai_key_input = input(f"  {C.BOLD}Enter Gemini API Key (or press Enter to skip AI scan): {C.RESET}").strip()
+            if ai_key_input:
+                args.ai_key = ai_key_input
+        print()
+
     # Restore mode
     if args.restore:
         print(f"  {C.BOLD}Target:{C.RESET}   {target}")
@@ -819,30 +844,7 @@ def main():
         restore_quarantined(str(target))
         sys.exit(0)
 
-    # Load AI key from config if not provided
     ai_key = args.ai_key
-    config_path = os.path.join(str(target), ".usb_defender_config.json")
-    if not ai_key and os.path.exists(config_path):
-        try:
-            with open(config_path, "r") as f:
-                config = json.load(f)
-            ai_key = config.get("gemini_api_key")
-        except Exception:
-            pass
-
-    # Save AI key to config for next time
-    if args.ai_key:
-        try:
-            config = {}
-            if os.path.exists(config_path):
-                with open(config_path, "r") as f:
-                    config = json.load(f)
-            config["gemini_api_key"] = args.ai_key
-            with open(config_path, "w") as f:
-                json.dump(config, f, indent=4)
-        except Exception:
-            pass
-
     # Validate AI key if provided
     if ai_key:
         if not validate_gemini_key(ai_key):

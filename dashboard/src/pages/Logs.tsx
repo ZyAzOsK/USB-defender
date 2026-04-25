@@ -10,7 +10,7 @@ export default function Logs() {
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState("");
   const [eventFilter, setEventFilter] = useState("");
-  const [limit, setLimit] = useState(50);
+  const [limit, _setLimit] = useState(50);
   const [offset, setOffset] = useState(0);
 
   useEffect(() => { load(); }, [eventFilter, limit, offset]);
