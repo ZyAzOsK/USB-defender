@@ -63,6 +63,27 @@ pub fn run() {
         .manage(BackendState {
             running: Mutex::new(false),
         })
+        .setup(|app| {
+            // Auto-start the Python API sidecar on app launch
+            let shell = app.shell();
+            let sidecar_result = shell
+                .sidecar("usb-defender-api")
+                .and_then(|cmd| {
+                    cmd.args(["--host", "127.0.0.1", "--port", "8642"])
+                        .spawn()
+                });
+            match sidecar_result {
+                Ok(_child) => {
+                    println!("✅ Sidecar started on http://127.0.0.1:8642");
+                    let state = app.state::<BackendState>();
+                    *state.running.lock().unwrap() = true;
+                }
+                Err(e) => {
+                    eprintln!("❌ Failed to start sidecar: {}", e);
+                }
+            }
+            Ok(())
+        })
         .invoke_handler(tauri::generate_handler![start_backend, get_backend_status])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
