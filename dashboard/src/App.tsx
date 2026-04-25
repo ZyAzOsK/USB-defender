@@ -11,6 +11,7 @@ import Monitor from "./pages/Monitor";
 import Scanner from "./pages/Scanner";
 import Quarantine from "./pages/Quarantine";
 import Logs from "./pages/Logs";
+import WelcomeModal from "./components/WelcomeModal";
 import { api } from "./api";
 
 export default function App() {
@@ -157,8 +158,8 @@ export default function App() {
           </div>
         </aside>
 
-        {/* ── Main content ── */}
         <main className="main-content">
+          <WelcomeModal />
           <Routes>
             <Route path="/" element={<Dashboard />} />
             <Route path="/monitor" element={<Monitor />} />
