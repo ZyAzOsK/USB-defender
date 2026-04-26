@@ -98,6 +98,22 @@ jobs:
             app/api.py
         shell: bash
 
+      - name: Build portable scanner (for Arm USB feature)
+        run: |
+          # Determine portable binary name for this OS
+          if [ "$RUNNER_OS" = "Windows" ]; then
+            PORTABLE_NAME="USBDefender.exe"
+          elif [ "$RUNNER_OS" = "macOS" ]; then
+            PORTABLE_NAME="usb-defender-macos"
+          else
+            PORTABLE_NAME="usb-defender-linux"
+          fi
+          pyinstaller --onefile --clean --noconfirm \
+            --name "$PORTABLE_NAME" \
+            --distpath dashboard/src-tauri/sidecars \
+            portable/usb_defender_portable.py
+        shell: bash
+
       - name: Rename sidecar with target triple
         run: |
           cd dashboard/src-tauri/sidecars

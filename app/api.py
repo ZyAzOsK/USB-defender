@@ -209,9 +209,12 @@ class ArmUSBRequest(BaseModel):
 async def arm_usb(req: ArmUSBRequest):
     """Deploy the portable scanner binary to the specified USB drive root."""
     import platform
-    target_dir = Path(req.usb_path)
+
+    # Normalize path — strip shell backslash-escapes and trailing slashes
+    usb_path_str = req.usb_path.replace("\\ ", " ").rstrip("/").rstrip("\\")
+    target_dir = Path(usb_path_str)
     if not target_dir.exists() or not target_dir.is_dir():
-        raise HTTPException(status_code=400, detail="Invalid USB path")
+        raise HTTPException(status_code=400, detail=f"Invalid USB path: {target_dir}")
 
     # Determine which binary to copy based on host OS
     sys_name = platform.system().lower()
@@ -221,24 +224,32 @@ async def arm_usb(req: ArmUSBRequest):
     elif sys_name == "darwin":
         binary_name = "usb-defender-macos"
 
-    # Assume we are running from project root or inside Tauri bundle
-    project_root = Path(__file__).resolve().parent.parent
-    dist_dir = project_root / "portable" / "dist"
-    source_binary = dist_dir / binary_name
+    # When running as a PyInstaller frozen binary, __file__ is inside a temp
+    # _MEIPASS directory. The portable binary is bundled next to sys.executable.
+    if getattr(sys, 'frozen', False):
+        # Inside Tauri bundle: portable binary sits alongside the sidecar exe
+        exe_dir = Path(sys.executable).resolve().parent
+        source_binary = exe_dir / binary_name
+    else:
+        # Development: look in portable/dist relative to project root
+        project_root = Path(__file__).resolve().parent.parent
+        source_binary = project_root / "portable" / "dist" / binary_name
 
     if not source_binary.exists():
         raise HTTPException(
-            status_code=500, 
-            detail=f"Portable binary not found at {source_binary}. Please compile it first using build_portable.py."
+            status_code=500,
+            detail=(
+                f"Portable binary not found at {source_binary}. "
+                "The installer package may not include the portable scanner — "
+                "download it separately from the Releases page."
+            )
         )
 
     dest_binary = target_dir / binary_name
     try:
         shutil.copy2(source_binary, dest_binary)
-        # Ensure executable permissions on Linux/Mac
         if sys_name != "windows":
             dest_binary.chmod(0o755)
-            
         return {"status": "success", "message": f"Successfully deployed {binary_name} to {target_dir}"}
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Failed to copy binary: {str(e)}")
@@ -586,6 +597,15 @@ def main():
     parser.add_argument("--host", default="127.0.0.1", help="Host to bind (default: 127.0.0.1)")
     parser.add_argument("--port", type=int, default=8642, help="Port to bind (default: 8642)")
     args = parser.parse_args()
+
+    # Guard: if port is already in use (e.g. another instance is running),
+    # exit cleanly instead of crashing with an ugly traceback.
+    import socket
+    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
+        s.settimeout(1)
+        if s.connect_ex((args.host, args.port)) == 0:
+            print(f"⚠️  Port {args.port} is already in use — another instance may be running. Exiting.")
+            sys.exit(0)
 
     print(f"🛡️  USB Defender API starting on http://{args.host}:{args.port}")
     print(f"📖 API docs at http://{args.host}:{args.port}/docs")

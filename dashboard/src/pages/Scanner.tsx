@@ -10,15 +10,20 @@ export default function Scanner() {
   const [error, setError] = useState("");
   const [successMsg, setSuccessMsg] = useState("");
 
+  // Normalize paths: strip shell backslash-escapes and trailing slashes
+  // e.g. "/Volumes/KALI\ LINUX/" → "/Volumes/KALI LINUX"
+  const normalizePath = (p: string) => p.replace(/\\ /g, " ").replace(/[\/\\]+$/, "");
+
   async function runScan() {
-    if (!path.trim()) return;
+    const normalized = normalizePath(path);
+    if (!normalized) return;
     setScanning(true);
     setResult(null);
     setError("");
     setSuccessMsg("");
 
     try {
-      const data = await api.scan(path);
+      const data = await api.scan(normalized);
       setResult(data);
     } catch (e: any) {
       setError(e.message || "Scan failed");
@@ -28,13 +33,14 @@ export default function Scanner() {
   }
 
   async function armUsb() {
-    if (!path.trim()) return;
+    const normalized = normalizePath(path);
+    if (!normalized) return;
     setArming(true);
     setError("");
     setSuccessMsg("");
 
     try {
-      const res = await api.armUsb(path);
+      const res = await api.armUsb(normalized);
       setSuccessMsg(res.message);
     } catch (e: any) {
       setError(e.message || "Failed to arm USB");

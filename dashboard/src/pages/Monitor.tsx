@@ -25,11 +25,15 @@ export default function Monitor() {
   const wsRef = useRef<WebSocket | null>(null);
   const feedRef = useRef<HTMLDivElement>(null);
 
+  // Normalize paths: strip shell backslash-escapes and trailing slashes
+  // e.g. "/Volumes/KALI\ LINUX/" → "/Volumes/KALI LINUX"
+  const normalizePath = (p: string) => p.replace(/\\ /g, " ").replace(/[\/\\]+$/, "");
+
   // Auto-detect USB on mount
   useEffect(() => {
     api.status().then((s) => {
       if (s.usb_path) {
-        setUsbPath(s.usb_path);
+        setUsbPath(normalizePath(s.usb_path));
         setAutoDetected(true);
       }
     }).catch(() => {});
@@ -43,10 +47,11 @@ export default function Monitor() {
   }, [events]);
 
   function startMonitor() {
-    if (!usbPath.trim()) return;
+    const normalized = normalizePath(usbPath);
+    if (!normalized.trim()) return;
 
     const ws = connectMonitorWS(
-      usbPath,
+      normalized,
       (data: MonitorEvent) => {
         setEvents((prev) => [data, ...prev].slice(0, 200));
       },
