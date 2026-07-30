@@ -92,3 +92,69 @@ class TestVersionScriptIsPortable:
         )
         assert "UnicodeDecodeError" not in result.stderr, result.stderr
         assert result.returncode == 0, result.stdout + result.stderr
+
+
+class TestConsoleOutputIsUnicodeSafe:
+    """
+    Writing console output must never terminate the process.
+
+    Tauri spawns the API sidecar with a piped stdout. On Windows that means
+    Python uses cp1252 rather than the Unicode console API, so the emoji in
+    the startup banner raised UnicodeEncodeError and killed the sidecar
+    before uvicorn bound its port — the dashboard just showed
+    "Engine Offline". Forcing a legacy codec reproduces it on any platform.
+    """
+
+    LEGACY_ENV = {"PYTHONIOENCODING": "cp1252", "PYTHONUTF8": "0"}
+
+    def _legacy_env(self, tmp_path):
+        import os
+        env = dict(os.environ)
+        env.update(self.LEGACY_ENV)
+        env["USB_DEFENDER_DATA_DIR"] = str(tmp_path / "data")
+        return env
+
+    def test_emoji_banner_survives_a_legacy_codepage(self, tmp_path):
+        """Importing the app package must make stdout safe for its own output."""
+        script = (
+            "import sys; sys.path.insert(0, %r)\n"
+            "import paths\n"
+            "print('\\U0001F6E1\\uFE0F  USB Defender API starting')\n"
+            "print('\\U0001F4D6 API docs')\n"
+            "print('\\u26A0\\uFE0F  Port already in use')\n"
+        ) % str(REPO_ROOT / "app")
+
+        result = subprocess.run(
+            [sys.executable, "-c", script],
+            capture_output=True, text=True, env=self._legacy_env(tmp_path),
+        )
+        assert "UnicodeEncodeError" not in result.stderr, result.stderr
+        assert result.returncode == 0, result.stderr
+
+    def test_unconfigured_stdout_would_have_failed(self, tmp_path):
+        """
+        Confirms the guard above is meaningful rather than vacuous: the same
+        print without the reconfigure must still blow up.
+        """
+        result = subprocess.run(
+            [sys.executable, "-c", "print('\\U0001F6E1\\uFE0F  banner')"],
+            capture_output=True, text=True, env=self._legacy_env(tmp_path),
+        )
+        assert result.returncode != 0
+        assert "UnicodeEncodeError" in result.stderr
+
+    def test_portable_scanner_banner_survives_a_legacy_codepage(self, tmp_path):
+        """
+        The portable scanner prints a large box-drawing banner and runs on
+        untrusted machines, where output is often redirected to a file.
+        """
+        target = tmp_path / "drive"
+        target.mkdir()
+
+        result = subprocess.run(
+            [sys.executable, str(REPO_ROOT / "portable" / "usb_defender_portable.py"),
+             "--path", str(target)],
+            capture_output=True, text=True, env=self._legacy_env(tmp_path),
+        )
+        assert "UnicodeEncodeError" not in result.stderr, result.stderr
+        assert result.returncode == 0, result.stderr

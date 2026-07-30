@@ -168,9 +168,22 @@ class Colors:
 
     @staticmethod
     def enable():
-        """Enable ANSI colors on Windows."""
+        """Enable ANSI colors on Windows and make stdout Unicode-safe."""
         if platform.system() == "Windows":
             os.system("")  # Enables ANSI escape sequences on Windows 10+
+
+        # When output is redirected to a file or pipe, Windows Python uses
+        # the locale codec (cp1252) instead of the Unicode console API. The
+        # banner and box-drawing characters below would then raise
+        # UnicodeEncodeError and abort the scan. Degrade to "?" instead.
+        for stream in (sys.stdout, sys.stderr):
+            reconfigure = getattr(stream, "reconfigure", None)
+            if reconfigure is None:
+                continue
+            try:
+                reconfigure(encoding="utf-8", errors="replace")
+            except (ValueError, OSError):
+                pass
 
 
 # ======================================================================
