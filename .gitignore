@@ -52,7 +52,11 @@ dashboard/src-tauri/sidecars/_verify_data/
 # Tests & Scratch
 .pytest_cache/
 ws_test.py
-claude_briefing.md
+
+# Editor and tooling local config
+.editorconfig.local
+*.local.json
+*.local.md
 
 # PyInstaller
 *.spec
