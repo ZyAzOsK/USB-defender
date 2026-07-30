@@ -136,9 +136,14 @@ jobs:
           - os: macos-latest
             target-triple: aarch64-apple-darwin
             exe-suffix: ''
-          - os: macos-13
-            target-triple: x86_64-apple-darwin
-            exe-suffix: ''
+          # Intel macOS (macos-13 / x86_64-apple-darwin) is intentionally not
+          # built. Intel runners are scarce enough that the job sat queued for
+          # tens of minutes and blocked the release job behind it. Apple
+          # Silicon is the only Mac target shipped, which matches v1.0.2.
+          # To re-enable, add:
+          #   - os: macos-13
+          #     target-triple: x86_64-apple-darwin
+          #     exe-suffix: ''
     runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v4
