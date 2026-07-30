@@ -6,11 +6,10 @@ CLI log viewer and CSV exporter.
 Reads from the unified SQLite database.
 """
 
-import sqlite3
 from tabulate import tabulate
 import argparse
 import csv
-from db import DB_FILE, get_connection, _db_lock
+from db import get_connection, _db_lock
 
 
 # -------------------------
@@ -54,7 +53,7 @@ def fetch_logs(event=None, start=None, end=None, limit=50):
 # EXPORT LOGS
 # -------------------------
 def export_csv(rows, filename="usb_activity_export.csv"):
-    with open(filename, "w", newline="") as f:
+    with open(filename, "w", newline="", encoding="utf-8") as f:
         writer = csv.writer(f)
         writer.writerow([
             "Timestamp", "Event", "File Path", "Size", "SHA256",

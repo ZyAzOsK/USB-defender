@@ -11,12 +11,17 @@ env/
 venv/
 
 # USB Defender generated files
-/signatures.json
+# NOTE: app/signatures.json IS tracked — it ships as the bundled default rule
+# set. The live, user-editable copy lives in the per-user data directory
+# (~/.local/share/usb-defender, %APPDATA%, Application Support), not here.
 app/logs/
 *.db
+*.db-wal
+*.db-shm
 quarantine/
 *.qfile
 *.meta.json
+usb_defender_report.json
 
 # Build artifacts
 build/
@@ -37,16 +42,21 @@ Thumbs.db
 *.swp
 *.swo
 
-# Quarantine summary (auto-generated)
+# Quarantine summary (auto-generated; legacy location before the data-dir move)
 app/quarantine_summary.json
 
-# Compiled Sidecars
+# Compiled Sidecars — built by scripts/build_sidecar.{sh,bat}, never committed
 dashboard/src-tauri/sidecars/usb-defender-*
+dashboard/src-tauri/sidecars/_verify_data/
 
 # Tests & Scratch
 .pytest_cache/
 ws_test.py
-claude_briefing.md
+
+# Editor and tooling local config
+.editorconfig.local
+*.local.json
+*.local.md
 
 # PyInstaller
 *.spec

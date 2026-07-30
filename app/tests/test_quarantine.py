@@ -6,7 +6,6 @@ import os
 import json
 from quarantine import quarantine_file
 from quarantine_manager import list_quarantined, restore_quarantined, delete_quarantined
-from db import get_connection
 
 
 class TestQuarantineEncryption:
@@ -26,7 +25,9 @@ class TestQuarantineEncryption:
                 "action": "Quarantine", "description": "Test"}
 
         result = quarantine_file(file_path, info, str(qdir))
-        assert result is True
+        # Returns the .qfile path on success so callers can log where it went.
+        assert result is not None
+        assert str(result).endswith(".qfile")
 
         # Original should be gone
         assert not os.path.exists(file_path)
@@ -129,3 +130,35 @@ class TestQuarantineEncryption:
         # Files should be gone
         assert len(list(qdir.glob("*.qfile"))) == 0
         assert len(list(qdir.glob("*.meta.json"))) == 0
+
+
+class TestQuarantineSizeCap:
+    def test_oversized_file_is_not_reported_as_quarantined(self, fresh_db, monkeypatch):
+        """
+        quarantine_file returns the .qfile path or None. Returning a falsy
+        non-None value (False) would make scanner.py's `is not None` check
+        report an untouched file as quarantined.
+        """
+        import quarantine as q
+
+        qdir = fresh_db / "quarantine"
+        qdir.mkdir()
+        big = fresh_db / "big.bin"
+        big.write_bytes(b"\x00" * 2048)
+        monkeypatch.setattr(q, "MAX_QUARANTINE_SIZE", 1024)
+
+        result = q.quarantine_file(str(big), {"tag": "T", "severity": 10,
+                                              "category": "c", "action": "a",
+                                              "description": "d"}, str(qdir))
+        assert result is None
+        assert big.exists(), "oversized file must be left in place"
+        assert list(qdir.glob("*.qfile")) == []
+
+    def test_missing_file_returns_none(self, fresh_db):
+        from quarantine import quarantine_file
+        qdir = fresh_db / "quarantine"
+        qdir.mkdir()
+        result = quarantine_file(str(fresh_db / "absent.bin"),
+                                 {"tag": "T", "severity": 10, "category": "c",
+                                  "action": "a", "description": "d"}, str(qdir))
+        assert result is None

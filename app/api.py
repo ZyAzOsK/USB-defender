@@ -15,17 +15,19 @@ Usage:
 import os
 import sys
 import json
+import time
 import asyncio
 import argparse
 import platform
 import threading
+import shutil
 from pathlib import Path
 from datetime import datetime
 from contextlib import asynccontextmanager
 
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect, HTTPException, Query
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import JSONResponse
+from pydantic import BaseModel
 import uvicorn
 
 # Ensure app modules are importable
@@ -33,99 +35,188 @@ sys.path.insert(0, os.path.dirname(__file__))
 
 from db import init_db, get_connection, _db_lock, DB_FILE
 from scanner import scan_target
-from signatures import load_signatures, reload_signatures
-from threat_intel import enrich_tag
+from signatures import load_signatures, save_signatures
 from quarantine_manager import list_quarantined, restore_quarantined, delete_quarantined
 from quarantine import update_summary, SUMMARY_FILE
-from usb_detector import USBDetector
+from usb_detector import USBDetector, list_removable_mounts
+from paths import (
+    normalize_target_path,
+    check_scan_target,
+    get_bundle_dir,
+    get_executable_dir,
+    get_data_dir,
+)
+
+APP_VERSION = "1.0.3"
+
+# ==============================
+# State
+# ==============================
+_ws_clients: list[WebSocket] = []
+
+# The event loop uvicorn runs on. Captured at startup so worker threads can
+# schedule coroutines onto it; asyncio.get_event_loop() from a non-async
+# thread does not return the running loop, which is why auto-scan results
+# never reached the dashboard.
+_main_loop: asyncio.AbstractEventLoop | None = None
+
+# Auto-scan state
+_usb_detector: USBDetector | None = None
+_autoscan_enabled = False
+_autoscan_history: list[dict] = []          # recent auto-scan results
+_autoscan_lock = threading.Lock()
+_recent_autoscans: dict[str, float] = {}    # mount path -> last scan time
+AUTOSCAN_DEDUPE_SECONDS = 15
+
+# Live monitor state: one watchdog observer per path, reference counted so
+# two dashboard clients watching the same drive don't double-scan every event.
+_monitors: dict[str, dict] = {}
+_monitor_lock = threading.Lock()
+
+# Short-lived cache for mount enumeration. The dashboard polls /api/status
+# every few seconds from multiple components; each call otherwise re-reads
+# /proc/mounts and stats every sysfs entry.
+_mounts_cache: tuple[float, list[str]] = (0.0, [])
+MOUNTS_CACHE_TTL = 2.0
+
+
+def _cached_mounts() -> list[str]:
+    global _mounts_cache
+    now = time.monotonic()
+    stamp, value = _mounts_cache
+    if now - stamp < MOUNTS_CACHE_TTL:
+        return value
+    value = list_removable_mounts()
+    _mounts_cache = (now, value)
+    return value
+
 
 # ==============================
 # App Lifecycle
 # ==============================
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    """Initialize DB on startup, start auto-scan detector."""
+    """Initialize DB on startup, tear down background workers on shutdown."""
+    global _main_loop
+    _main_loop = asyncio.get_running_loop()
+
     init_db()
+    load_signatures()  # seeds the writable signatures.json on first run
+    print(f"📁 Data directory: {get_data_dir()}", flush=True)
+
     yield
-    # Shutdown: stop auto-scanner if running
+
     _autoscan_stop()
+    _stop_all_monitors()
+
 
 app = FastAPI(
     title="USB Defender API",
     description="REST + WebSocket API for USB-Defender dashboard",
-    version="1.0.0",
+    version=APP_VERSION,
     lifespan=lifespan,
 )
 
-# CORS — allow Tauri webview and dev server
+# CORS — the dashboard is a Tauri webview (origin tauri://localhost or
+# http://localhost:1420 in dev). Listing origins explicitly means a random
+# web page the user visits cannot drive this API, which matters because
+# these endpoints delete and encrypt files.
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],
+    allow_origins=[
+        "tauri://localhost",
+        "http://tauri.localhost",
+        "https://tauri.localhost",
+        "http://localhost:1420",
+        "http://127.0.0.1:1420",
+    ],
+    allow_origin_regex=r"^(tauri|https?)://(localhost|127\.0\.0\.1)(:\d+)?$",
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
 )
 
-# ==============================
-# State
-# ==============================
-_monitor_task = None
-_monitor_stop_event = threading.Event()
-_ws_clients: list[WebSocket] = []
-_scan_jobs: dict[str, dict] = {}
 
-# Auto-scan state
-_usb_detector: USBDetector | None = None
-_autoscan_enabled = False
-_autoscan_history: list[dict] = []  # recent auto-scan results
+# ==============================
+# Auto-scan plumbing
+# ==============================
+def _broadcast(message: dict):
+    """
+    Send a JSON frame to every connected WebSocket client from any thread.
+
+    Uses run_coroutine_threadsafe against the captured loop; scheduling with
+    asyncio.ensure_future from a worker thread silently did nothing.
+    """
+    if _main_loop is None or _main_loop.is_closed():
+        return
+
+    for ws in list(_ws_clients):
+        async def _send(target=ws):
+            try:
+                await target.send_json(message)
+            except Exception:
+                # Client vanished — drop it so the list cannot grow forever.
+                if target in _ws_clients:
+                    _ws_clients.remove(target)
+
+        try:
+            asyncio.run_coroutine_threadsafe(_send(), _main_loop)
+        except RuntimeError:
+            pass
 
 
 def _on_usb_inserted(mount_path: str):
     """Callback fired by USBDetector when a USB drive is inserted."""
     global _autoscan_history
-    print(f"🔌 USB INSERTED: {mount_path} — auto-scanning...")
 
-    try:
-        result = scan_target(mount_path)
+    mount_path = normalize_target_path(mount_path)
+    print(f"🔌 USB INSERTED: {mount_path} — auto-scanning...", flush=True)
+
+    # udev 'add' plus a mount-poll tick can both report the same drive.
+    now = time.monotonic()
+    with _autoscan_lock:
+        last = _recent_autoscans.get(mount_path, 0.0)
+        if now - last < AUTOSCAN_DEDUPE_SECONDS:
+            print(f"⏭  Skipping duplicate insert event for {mount_path}", flush=True)
+            return
+        _recent_autoscans[mount_path] = now
+
+    problem = check_scan_target(mount_path)
+    if problem:
         entry = {
             "timestamp": datetime.now().isoformat(),
             "mount_path": mount_path,
-            "summary": result,
-            "status": "completed",
+            "summary": {"detected": 0, "clean": 0, "quarantined": 0},
+            "status": f"skipped: {problem}",
         }
-    except Exception as e:
-        entry = {
-            "timestamp": datetime.now().isoformat(),
-            "mount_path": mount_path,
-            "summary": {"detected": 0, "clean": 0},
-            "status": f"error: {e}",
-        }
-
-    _autoscan_history = [entry] + _autoscan_history[:19]  # keep last 20
-
-    # Broadcast to all connected WebSocket clients
-    _broadcast_autoscan_event(entry)
-    print(f"✅ Auto-scan complete: {entry['summary']}")
-
-
-def _broadcast_autoscan_event(entry: dict):
-    """Send auto-scan result to all connected WebSocket clients."""
-    import asyncio
-    for ws in list(_ws_clients):
+    else:
         try:
-            loop = asyncio.get_event_loop()
-            if loop.is_running():
-                asyncio.ensure_future(ws.send_json({
-                    "type": "autoscan",
-                    "data": entry,
-                }))
-        except Exception:
-            pass
+            result = scan_target(mount_path)
+            entry = {
+                "timestamp": datetime.now().isoformat(),
+                "mount_path": mount_path,
+                "summary": result,
+                "status": "completed",
+            }
+        except Exception as e:
+            entry = {
+                "timestamp": datetime.now().isoformat(),
+                "mount_path": mount_path,
+                "summary": {"detected": 0, "clean": 0, "quarantined": 0},
+                "status": f"error: {e}",
+            }
+
+    with _autoscan_lock:
+        _autoscan_history = [entry] + _autoscan_history[:19]  # keep last 20
+
+    _broadcast({"type": "autoscan", "data": entry})
+    print(f"✅ Auto-scan complete: {entry['summary']}", flush=True)
 
 
 def _on_usb_removed(dev_path: str):
     """Callback fired when a USB drive is removed."""
-    print(f"⏏️  USB REMOVED: {dev_path}")
+    print(f"⏏️  USB REMOVED: {dev_path}", flush=True)
+    _broadcast({"type": "usb_removed", "data": {"path": dev_path}})
 
 
 def _autoscan_stop():
@@ -133,7 +224,71 @@ def _autoscan_stop():
     global _usb_detector, _autoscan_enabled
     if _usb_detector and _usb_detector.running:
         _usb_detector.stop()
+    _usb_detector = None
     _autoscan_enabled = False
+
+
+# ==============================
+# Live monitor plumbing
+# ==============================
+def _start_monitor(path: str):
+    """Start (or join) a watchdog observer for path. Returns the entry."""
+    from watcher import USBEventHandler
+    from watchdog.observers import Observer
+
+    with _monitor_lock:
+        entry = _monitors.get(path)
+        if entry:
+            entry["clients"] += 1
+            return entry
+
+        handler = USBEventHandler(path, str(get_data_dir() / "logs"))
+        observer = Observer()
+        observer.schedule(handler, path, recursive=True)
+        observer.start()
+
+        entry = {"observer": observer, "handler": handler, "clients": 1}
+        _monitors[path] = entry
+        print(f"👁  Monitoring started on {path}", flush=True)
+        return entry
+
+
+def _stop_monitor(path: str):
+    """Release one client's hold on a monitor; stop it when the last leaves."""
+    with _monitor_lock:
+        entry = _monitors.get(path)
+        if not entry:
+            return
+        entry["clients"] -= 1
+        if entry["clients"] > 0:
+            return
+        _monitors.pop(path, None)
+
+    try:
+        entry["observer"].stop()
+        entry["observer"].join(timeout=5)
+    except Exception:
+        pass
+    print(f"🛑 Monitoring stopped on {path}", flush=True)
+
+
+def _stop_all_monitors():
+    with _monitor_lock:
+        paths = list(_monitors.keys())
+    for path in paths:
+        with _monitor_lock:
+            entry = _monitors.pop(path, None)
+        if entry:
+            try:
+                entry["observer"].stop()
+                entry["observer"].join(timeout=5)
+            except Exception:
+                pass
+
+
+def _monitoring_active() -> bool:
+    with _monitor_lock:
+        return any(e["observer"].is_alive() for e in _monitors.values())
 
 
 # ==============================
@@ -142,19 +297,35 @@ def _autoscan_stop():
 @app.get("/api/status")
 async def get_status():
     """Health check + system info."""
-    from main import find_usb_mount
-    usb = find_usb_mount()
+    mounts = _cached_mounts()
+    usb = mounts[0] if mounts else None
+
+    with _monitor_lock:
+        monitored = list(_monitors.keys())
+
     return {
         "status": "running",
+        "version": APP_VERSION,
         "timestamp": datetime.now().isoformat(),
         "usb_detected": usb is not None,
         "usb_path": usb,
+        "usb_mounts": mounts,
         "db_path": str(DB_FILE),
-        "monitoring_active": _monitor_task is not None and _monitor_task.is_alive(),
+        "data_dir": str(get_data_dir()),
+        "monitoring_active": _monitoring_active(),
+        "monitored_paths": monitored,
         "autoscan_enabled": _autoscan_enabled,
         "autoscan_detector_running": _usb_detector is not None and _usb_detector.running,
         "platform": platform.system(),
     }
+
+
+@app.get("/api/mounts")
+async def get_mounts():
+    """List currently mounted removable volumes, for the UI drive picker."""
+    mounts = _cached_mounts()
+    return {"platform": platform.system(), "mounts": mounts}
+
 
 # ==============================
 # Auto-Scan (USB Insertion Detection)
@@ -167,8 +338,13 @@ async def enable_autoscan():
     if _autoscan_enabled and _usb_detector and _usb_detector.running:
         return {"status": "already_enabled", "message": "Auto-scan is already active."}
 
-    _usb_detector = USBDetector(on_insert=_on_usb_inserted, on_remove=_on_usb_removed)
-    _usb_detector.start()
+    detector = USBDetector(on_insert=_on_usb_inserted, on_remove=_on_usb_removed)
+    try:
+        detector.start()
+    except OSError as e:
+        raise HTTPException(status_code=501, detail=str(e))
+
+    _usb_detector = detector
     _autoscan_enabled = True
 
     return {
@@ -188,71 +364,132 @@ async def disable_autoscan():
 @app.get("/api/autoscan/status")
 async def autoscan_status():
     """Get current auto-scan status and recent history."""
+    with _autoscan_lock:
+        history = list(_autoscan_history)
+
     return {
         "enabled": _autoscan_enabled,
         "detector_running": _usb_detector is not None and _usb_detector.running,
         "platform": platform.system(),
-        "history": _autoscan_history,
+        "history": history,
     }
 
 
 # ==============================
 # Portable USB Deployment
 # ==============================
-from pydantic import BaseModel
-import shutil
-
 class ArmUSBRequest(BaseModel):
     usb_path: str
+
+
+def _portable_binary_candidates() -> list[Path]:
+    """
+    Every location the portable scanner might live, most likely first.
+
+    Installed builds get it from Tauri's externalBin, which lands next to the
+    main app executable under the canonical name. Dev builds read
+    portable/dist. The legacy per-OS names are still accepted so a manually
+    assembled tree keeps working.
+    """
+    sys_name = platform.system().lower()
+    if sys_name == "windows":
+        names = ["usb-defender-portable.exe", "USBDefender.exe"]
+    elif sys_name == "darwin":
+        names = ["usb-defender-portable", "usb-defender-macos"]
+    else:
+        names = ["usb-defender-portable", "usb-defender-linux"]
+
+    exe_dir = get_executable_dir()
+    project_root = Path(__file__).resolve().parent.parent
+
+    dirs = [
+        exe_dir,
+        exe_dir / "bin",
+        exe_dir.parent,
+        exe_dir.parent / "lib" / "usb-defender",
+        get_bundle_dir(),
+        project_root / "portable" / "dist",
+        project_root / "dashboard" / "src-tauri" / "sidecars",
+    ]
+
+    return [d / n for d in dirs for n in names]
+
+
+def _deploy_name() -> str:
+    """
+    Filename to write on the USB drive. Kept as the platform-friendly names
+    that scan.sh and scan.bat already look for.
+    """
+    sys_name = platform.system().lower()
+    if sys_name == "windows":
+        return "USBDefender.exe"
+    if sys_name == "darwin":
+        return "usb-defender-macos"
+    return "usb-defender-linux"
+
+
+def _launcher_candidates() -> list[Path]:
+    """Locate the convenience launcher scripts to ship alongside the binary."""
+    name = "scan.bat" if platform.system().lower() == "windows" else "scan.sh"
+    project_root = Path(__file__).resolve().parent.parent
+    return [
+        get_bundle_dir() / name,
+        get_executable_dir() / name,
+        project_root / "portable" / name,
+    ]
+
 
 @app.post("/api/arm-usb")
 async def arm_usb(req: ArmUSBRequest):
     """Deploy the portable scanner binary to the specified USB drive root."""
-    import platform
+    usb_path = normalize_target_path(req.usb_path)
+    target_dir = Path(usb_path)
 
-    # Normalize path — strip shell backslash-escapes and trailing slashes
-    usb_path_str = req.usb_path.replace("\\ ", " ").rstrip("/").rstrip("\\")
-    target_dir = Path(usb_path_str)
-    if not target_dir.exists() or not target_dir.is_dir():
-        raise HTTPException(status_code=400, detail=f"Invalid USB path: {target_dir}")
+    if not usb_path or not target_dir.is_dir():
+        raise HTTPException(status_code=400, detail=f"Invalid USB path: {req.usb_path}")
 
-    # Determine which binary to copy based on host OS
-    sys_name = platform.system().lower()
-    binary_name = "usb-defender-linux"
-    if sys_name == "windows":
-        binary_name = "USBDefender.exe"
-    elif sys_name == "darwin":
-        binary_name = "usb-defender-macos"
-
-    # When running as a PyInstaller frozen binary, __file__ is inside a temp
-    # _MEIPASS directory. The portable binary is bundled next to sys.executable.
-    if getattr(sys, 'frozen', False):
-        # Inside Tauri bundle: portable binary sits alongside the sidecar exe
-        exe_dir = Path(sys.executable).resolve().parent
-        source_binary = exe_dir / binary_name
-    else:
-        # Development: look in portable/dist relative to project root
-        project_root = Path(__file__).resolve().parent.parent
-        source_binary = project_root / "portable" / "dist" / binary_name
-
-    if not source_binary.exists():
+    source_binary = next((c for c in _portable_binary_candidates() if c.is_file()), None)
+    if source_binary is None:
+        searched = "\n  ".join(str(c) for c in _portable_binary_candidates())
         raise HTTPException(
             status_code=500,
             detail=(
-                f"Portable binary not found at {source_binary}. "
-                "The installer package may not include the portable scanner — "
-                "download it separately from the Releases page."
-            )
+                "Portable scanner binary not found. Searched:\n  " + searched +
+                "\nDownload it from the Releases page and place it next to the "
+                "application executable, or run portable/build_portable.py."
+            ),
         )
 
-    dest_binary = target_dir / binary_name
+    dest_binary = target_dir / _deploy_name()
     try:
         shutil.copy2(source_binary, dest_binary)
-        if sys_name != "windows":
+        if platform.system().lower() != "windows":
             dest_binary.chmod(0o755)
-        return {"status": "success", "message": f"Successfully deployed {binary_name} to {target_dir}"}
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Failed to copy binary: {str(e)}")
+    except OSError as e:
+        raise HTTPException(
+            status_code=500,
+            detail=f"Failed to copy scanner to {dest_binary}: {e}",
+        )
+
+    # Best effort: a launcher script makes the drive double-clickable.
+    deployed = [dest_binary.name]
+    launcher = next((c for c in _launcher_candidates() if c.is_file()), None)
+    if launcher is not None:
+        try:
+            dest_launcher = target_dir / launcher.name
+            shutil.copy2(launcher, dest_launcher)
+            if platform.system().lower() != "windows":
+                dest_launcher.chmod(0o755)
+            deployed.append(dest_launcher.name)
+        except OSError:
+            pass
+
+    return {
+        "status": "success",
+        "deployed": deployed,
+        "source": str(source_binary),
+        "message": f"Deployed {' + '.join(deployed)} to {target_dir}",
+    }
 
 
 # ==============================
@@ -261,14 +498,17 @@ async def arm_usb(req: ArmUSBRequest):
 @app.post("/api/scan")
 async def trigger_scan(path: str = Query(..., description="Path to scan")):
     """Trigger a one-time scan. Returns results directly."""
-    if not os.path.exists(path):
-        raise HTTPException(status_code=404, detail=f"Path not found: {path}")
+    target = normalize_target_path(path)
 
-    # Run scan in thread to not block
-    loop = asyncio.get_event_loop()
-    result = await loop.run_in_executor(None, scan_target, path)
+    problem = check_scan_target(target)
+    if problem:
+        # 400 rather than 404 — the path may well exist, we are refusing it.
+        raise HTTPException(status_code=400, detail=problem)
 
-    # Fetch recent scan logs from DB
+    loop = asyncio.get_running_loop()
+    result = await loop.run_in_executor(None, scan_target, target)
+
+    # Fetch this scan's log rows
     with _db_lock:
         conn = get_connection()
         cur = conn.cursor()
@@ -289,7 +529,7 @@ async def trigger_scan(path: str = Query(..., description="Path to scan")):
 
     return {
         "summary": result,
-        "scan_path": path,
+        "scan_path": target,
         "details": scan_logs,
     }
 
@@ -316,7 +556,9 @@ async def get_logs(
         params = []
 
         if event:
-            query += " AND event_type = ?"
+            # event_type is stored with mixed case ('Scan', 'Created'), so
+            # compare case-insensitively instead of forcing upper().
+            query += " AND UPPER(event_type) = ?"
             params.append(event.upper())
 
         query += " ORDER BY id DESC LIMIT ? OFFSET ?"
@@ -325,11 +567,10 @@ async def get_logs(
         cur.execute(query, params)
         rows = cur.fetchall()
 
-        # Get total count
         count_query = "SELECT COUNT(*) FROM logs WHERE 1=1"
         count_params = []
         if event:
-            count_query += " AND event_type = ?"
+            count_query += " AND UPPER(event_type) = ?"
             count_params.append(event.upper())
         cur.execute(count_query, count_params)
         total = cur.fetchone()[0]
@@ -367,25 +608,29 @@ async def get_quarantine():
 @app.post("/api/quarantine/{entry_id}/restore")
 async def restore_entry(entry_id: int):
     """Restore a quarantined file to its original location."""
-    rows = list_quarantined()
-    ids = [r[0] for r in rows]
-    if entry_id not in ids:
+    if entry_id not in {r[0] for r in list_quarantined()}:
         raise HTTPException(status_code=404, detail="Quarantine entry not found")
 
-    loop = asyncio.get_event_loop()
+    loop = asyncio.get_running_loop()
     await loop.run_in_executor(None, restore_quarantined, entry_id)
+
+    # Confirm it actually left the table; restore_quarantined swallows errors.
+    if entry_id in {r[0] for r in list_quarantined()}:
+        raise HTTPException(
+            status_code=500,
+            detail="Restore failed — the quarantined payload or its metadata "
+                   "could not be read. The entry was left untouched.",
+        )
     return {"status": "restored", "entry_id": entry_id}
 
 
 @app.delete("/api/quarantine/{entry_id}")
 async def delete_entry(entry_id: int):
     """Permanently delete a quarantined file."""
-    rows = list_quarantined()
-    ids = [r[0] for r in rows]
-    if entry_id not in ids:
+    if entry_id not in {r[0] for r in list_quarantined()}:
         raise HTTPException(status_code=404, detail="Quarantine entry not found")
 
-    loop = asyncio.get_event_loop()
+    loop = asyncio.get_running_loop()
     await loop.run_in_executor(None, delete_quarantined, entry_id)
     return {"status": "deleted", "entry_id": entry_id}
 
@@ -393,13 +638,15 @@ async def delete_entry(entry_id: int):
 @app.get("/api/quarantine/summary")
 async def get_quarantine_summary():
     """Get quarantine summary statistics."""
-    # Rebuild summary fresh
-    loop = asyncio.get_event_loop()
+    loop = asyncio.get_running_loop()
     await loop.run_in_executor(None, update_summary)
 
     if SUMMARY_FILE.exists():
-        with open(SUMMARY_FILE) as f:
-            return json.load(f)
+        try:
+            with open(SUMMARY_FILE) as f:
+                return json.load(f)
+        except (OSError, json.JSONDecodeError):
+            pass
     return {"stats": {"total_quarantined": 0}, "top_threats": []}
 
 
@@ -415,74 +662,106 @@ async def get_signatures():
 @app.put("/api/signatures")
 async def update_signatures(payload: dict):
     """Update signature rules JSON."""
-    from signatures import SIGNATURE_FILE
-    with open(SIGNATURE_FILE, "w") as f:
-        json.dump(payload, f, indent=4)
-    reload_signatures()
+    if not isinstance(payload.get("rules"), list):
+        raise HTTPException(
+            status_code=422,
+            detail="Payload must contain a 'rules' array.",
+        )
+    if not isinstance(payload.get("malware_hashes", []), list):
+        raise HTTPException(
+            status_code=422,
+            detail="'malware_hashes' must be an array when present.",
+        )
+
+    try:
+        save_signatures(payload)
+    except OSError as e:
+        raise HTTPException(status_code=500, detail=f"Could not save signatures: {e}")
+
     return {"status": "updated", "rules_count": len(payload.get("rules", []))}
 
 
 # ==============================
 # WebSocket: Real-time Monitor
 # ==============================
+async def _watch_for_disconnect(websocket: WebSocket, disconnected: asyncio.Event):
+    """
+    Consume incoming frames purely to notice when the client goes away.
+    Without a pending receive, a disconnect is only discovered on the next
+    send, which can leave the watchdog observer running for a long time.
+    """
+    try:
+        while True:
+            await websocket.receive_text()
+    except Exception:
+        disconnected.set()
+
+
 @app.websocket("/ws/monitor")
 async def ws_monitor(websocket: WebSocket):
     """
     WebSocket endpoint for real-time monitoring events.
-    Client connects, sends a JSON with {"path": "/mount/usb"} to start.
-    Server streams detection events as JSON frames.
+    Client connects, sends {"path": "/mount/usb"} to start.
+    Server streams detection events for that path as JSON frames.
     """
     await websocket.accept()
     _ws_clients.append(websocket)
 
-    try:
-        # Wait for client to send the target path
-        data = await websocket.receive_json()
-        target_path = data.get("path", "")
+    monitor_path = None
+    disconnected = asyncio.Event()
+    reader = None
 
-        if not target_path or not os.path.exists(target_path):
-            await websocket.send_json({"error": f"Invalid path: {target_path}"})
+    try:
+        try:
+            data = await websocket.receive_json()
+        except Exception:
+            return
+
+        target_path = normalize_target_path(data.get("path", ""))
+        problem = check_scan_target(target_path)
+        if problem:
+            await websocket.send_json({"type": "error", "error": problem})
+            return
+
+        try:
+            _start_monitor(target_path)
+            monitor_path = target_path
+        except Exception as e:
+            await websocket.send_json({
+                "type": "error",
+                "error": f"Could not start monitoring {target_path}: {e}",
+            })
             return
 
         await websocket.send_json({
             "type": "status",
-            "message": f"Monitoring started on {target_path}"
+            "message": f"Monitoring started on {target_path}",
+            "path": target_path,
         })
 
-        # Start watchdog in a background thread
-        from watcher import USBEventHandler
-        from watchdog.observers import Observer
-
-        log_path = os.path.join(os.path.dirname(__file__), "logs")
-        handler = USBEventHandler(target_path, log_path)
-        observer = Observer()
-        observer.schedule(handler, target_path, recursive=True)
-        observer.start()
-
-        # Poll for new log entries and stream them
+        reader = asyncio.create_task(_watch_for_disconnect(websocket, disconnected))
         last_id = _get_last_log_id()
 
-        try:
-            while True:
-                await asyncio.sleep(0.5)
+        while not disconnected.is_set():
+            try:
+                await asyncio.wait_for(disconnected.wait(), timeout=0.5)
+                break
+            except asyncio.TimeoutError:
+                pass
 
-                new_entries = _get_logs_after(last_id)
-                for entry in new_entries:
-                    await websocket.send_json({
-                        "type": "event",
-                        "data": entry
-                    })
-                    last_id = max(last_id, entry["id"])
-
-        except WebSocketDisconnect:
-            pass
-        finally:
-            observer.stop()
-            observer.join()
+            for entry in _get_logs_after(last_id, target_path):
+                await websocket.send_json({"type": "event", "data": entry})
+                last_id = max(last_id, entry["id"])
 
     except WebSocketDisconnect:
         pass
+    except Exception as e:
+        print(f"[ws_monitor] error: {e}", flush=True)
     finally:
+        if reader is not None:
+            reader.cancel()
+        if monitor_path is not None:
+            _stop_monitor(monitor_path)
         if websocket in _ws_clients:
             _ws_clients.remove(websocket)
 
@@ -498,8 +777,14 @@ def _get_last_log_id() -> int:
     return row[0] or 0
 
 
-def _get_logs_after(after_id: int) -> list[dict]:
-    """Get log entries with id > after_id."""
+def _get_logs_after(after_id: int, path_prefix: str | None = None) -> list[dict]:
+    """
+    Get log entries with id > after_id, optionally limited to a subtree.
+
+    The prefix filter matters: a scan running elsewhere writes to the same
+    logs table, and without it the Live Monitor showed events for files that
+    have nothing to do with the drive being watched.
+    """
     with _db_lock:
         conn = get_connection()
         cur = conn.cursor()
@@ -507,14 +792,25 @@ def _get_logs_after(after_id: int) -> list[dict]:
             SELECT id, timestamp, event_type, file_path, tag, severity,
                    category, action, description
             FROM logs WHERE id > ?
-            ORDER BY id ASC
+            ORDER BY id ASC LIMIT 500
         """, (after_id,))
         rows = cur.fetchall()
         conn.close()
 
     columns = ["id", "timestamp", "event_type", "file_path", "tag",
                "severity", "category", "action", "description"]
-    return [dict(zip(columns, row)) for row in rows]
+    entries = [dict(zip(columns, row)) for row in rows]
+
+    if path_prefix:
+        normalized = os.path.normcase(os.path.normpath(path_prefix))
+        entries = [
+            e for e in entries
+            if e["file_path"] and os.path.normcase(
+                os.path.normpath(e["file_path"])
+            ).startswith(normalized)
+        ]
+
+    return entries
 
 
 # ==============================
@@ -527,22 +823,18 @@ async def get_dashboard_stats():
         conn = get_connection()
         cur = conn.cursor()
 
-        # Total events
         cur.execute("SELECT COUNT(*) FROM logs")
         total_events = cur.fetchone()[0]
 
-        # Events by type
         cur.execute("""
             SELECT event_type, COUNT(*) FROM logs
             GROUP BY event_type ORDER BY COUNT(*) DESC
         """)
         events_by_type = {r[0]: r[1] for r in cur.fetchall()}
 
-        # Threats detected (severity > 0)
         cur.execute("SELECT COUNT(*) FROM logs WHERE severity > 0 AND tag != 'Clean'")
         threats_detected = cur.fetchone()[0]
 
-        # Severity distribution
         cur.execute("""
             SELECT
                 SUM(CASE WHEN severity >= 8 THEN 1 ELSE 0 END) as critical,
@@ -553,7 +845,6 @@ async def get_dashboard_stats():
         sev = cur.fetchone()
         severity_dist = {"critical": sev[0] or 0, "medium": sev[1] or 0, "low": sev[2] or 0}
 
-        # Top threat categories
         cur.execute("""
             SELECT category, COUNT(*) FROM logs
             WHERE tag != 'Clean' AND severity > 0
@@ -561,11 +852,9 @@ async def get_dashboard_stats():
         """)
         top_categories = [{"category": r[0], "count": r[1]} for r in cur.fetchall()]
 
-        # Quarantine count
         cur.execute("SELECT COUNT(*) FROM quarantine")
         quarantined = cur.fetchone()[0]
 
-        # Recent activity (last 10)
         cur.execute("""
             SELECT timestamp, event_type, file_path, tag, severity, category
             FROM logs ORDER BY id DESC LIMIT 10
@@ -592,23 +881,36 @@ async def get_dashboard_stats():
 # ==============================
 # CLI Entry Point
 # ==============================
+def _port_in_use(host: str, port: int) -> bool:
+    """
+    True when something already accepts connections on host:port.
+
+    A previous sidecar that outlived its parent window would otherwise make
+    the new instance die on bind with an opaque traceback.
+    """
+    import socket
+    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
+        s.settimeout(1)
+        return s.connect_ex((host, port)) == 0
+
+
 def main():
     parser = argparse.ArgumentParser(description="USB Defender API Server")
     parser.add_argument("--host", default="127.0.0.1", help="Host to bind (default: 127.0.0.1)")
     parser.add_argument("--port", type=int, default=8642, help="Port to bind (default: 8642)")
+    parser.add_argument("--version", action="version", version=f"USB Defender API {APP_VERSION}")
     args = parser.parse_args()
 
-    # Guard: if port is already in use (e.g. another instance is running),
-    # exit cleanly instead of crashing with an ugly traceback.
-    import socket
-    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
-        s.settimeout(1)
-        if s.connect_ex((args.host, args.port)) == 0:
-            print(f"⚠️  Port {args.port} is already in use — another instance may be running. Exiting.")
-            sys.exit(0)
+    if _port_in_use(args.host, args.port):
+        print(
+            f"⚠️  Port {args.port} is already in use — another USB Defender "
+            f"instance is already serving. Exiting.",
+            flush=True,
+        )
+        sys.exit(0)
 
-    print(f"🛡️  USB Defender API starting on http://{args.host}:{args.port}")
-    print(f"📖 API docs at http://{args.host}:{args.port}/docs")
+    print(f"🛡️  USB Defender API {APP_VERSION} starting on http://{args.host}:{args.port}", flush=True)
+    print(f"📖 API docs at http://{args.host}:{args.port}/docs", flush=True)
 
     uvicorn.run(app, host=args.host, port=args.port, log_level="info")
 

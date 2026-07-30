@@ -3,6 +3,7 @@ import {
   FileText, RefreshCw, Download, Filter, AlertTriangle,
 } from "lucide-react";
 import { api, LogEntry } from "../api";
+import { basename, severityClass } from "../utils";
 
 export default function Logs() {
   const [logs, setLogs] = useState<LogEntry[]>([]);
@@ -34,16 +35,34 @@ export default function Logs() {
   }
 
   function exportCSV() {
-    const header = "ID,Timestamp,Event,File,Tag,Severity,Category,Action\n";
-    const rows = logs.map((l) =>
-      `${l.id},"${l.timestamp}","${l.event_type}","${l.file_path}","${l.tag}",${l.severity},"${l.category}","${l.action}"`
-    ).join("\n");
-    const blob = new Blob([header + rows], { type: "text/csv" });
+    // RFC 4180: a quote inside a quoted field is escaped by doubling it.
+    // Without this, any path containing a quote shifted every later column.
+    const cell = (value: unknown) => `"${String(value ?? "").replace(/"/g, '""')}"`;
+
+    const header = "ID,Timestamp,Event,File,SHA256,Tag,Severity,Category,Action\n";
+    const rows = logs
+      .map((l) =>
+        [
+          l.id,
+          cell(l.timestamp),
+          cell(l.event_type),
+          cell(l.file_path),
+          cell(l.sha256),
+          cell(l.tag),
+          l.severity,
+          cell(l.category),
+          cell(l.action),
+        ].join(",")
+      )
+      .join("\n");
+
+    const blob = new Blob([header + rows], { type: "text/csv;charset=utf-8" });
     const url = URL.createObjectURL(blob);
     const a = document.createElement("a");
     a.href = url;
     a.download = `usb-defender-logs-${new Date().toISOString().slice(0, 10)}.csv`;
     a.click();
+    URL.revokeObjectURL(url);
   }
 
   const totalPages = Math.ceil(total / limit);
@@ -129,18 +148,14 @@ export default function Logs() {
                       <td className="text-mono text-sm">{l.timestamp}</td>
                       <td>{l.event_type}</td>
                       <td title={l.file_path} style={{ maxWidth: 180 }}>
-                        {l.file_path.split("/").pop()}
+                        {basename(l.file_path)}
                       </td>
                       <td className="text-mono text-sm" title={l.sha256 || ""} style={{ maxWidth: 100 }}>
                         {l.sha256 ? l.sha256.slice(0, 12) + "…" : "—"}
                       </td>
                       <td>{l.tag}</td>
                       <td>
-                        <span className={`badge ${
-                          l.severity >= 8 ? "critical" :
-                          l.severity >= 5 ? "medium" :
-                          l.severity > 0 ? "low" : "clean"
-                        }`}>
+                        <span className={`badge ${severityClass(l.severity)}`}>
                           {l.severity}
                         </span>
                       </td>

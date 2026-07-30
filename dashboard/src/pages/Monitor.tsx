@@ -3,6 +3,7 @@ import {
   Radio, ShieldCheck, ShieldAlert, Wifi, WifiOff,
 } from "lucide-react";
 import { api, connectMonitorWS } from "../api";
+import { normalizePath, severityClass } from "../utils";
 
 interface MonitorEvent {
   id: number;
@@ -25,10 +26,6 @@ export default function Monitor() {
   const wsRef = useRef<WebSocket | null>(null);
   const feedRef = useRef<HTMLDivElement>(null);
 
-  // Normalize paths: strip shell backslash-escapes and trailing slashes
-  // e.g. "/Volumes/KALI\ LINUX/" → "/Volumes/KALI LINUX"
-  const normalizePath = (p: string) => p.replace(/\\ /g, " ").replace(/[\/\\]+$/, "");
-
   // Auto-detect USB on mount
   useEffect(() => {
     api.status().then((s) => {
@@ -45,6 +42,15 @@ export default function Monitor() {
       feedRef.current.scrollTop = 0;
     }
   }, [events]);
+
+  // Close the socket if the user navigates away mid-session, otherwise the
+  // server keeps a watchdog observer alive for a client that is gone.
+  useEffect(() => {
+    return () => {
+      wsRef.current?.close();
+      wsRef.current = null;
+    };
+  }, []);
 
   function startMonitor() {
     const normalized = normalizePath(usbPath);
@@ -67,6 +73,10 @@ export default function Monitor() {
       (err) => {
         setStatusMsg("Error: " + err);
         setConnected(false);
+        // A rejected path (unsafe or missing) leaves a socket the server has
+        // already finished with; drop it so Start works again.
+        wsRef.current?.close();
+        wsRef.current = null;
       }
     );
 
@@ -162,11 +172,7 @@ export default function Monitor() {
                     <div className="event-details">
                       <div className="event-tag">
                         {e.tag}
-                        <span className={`badge ${
-                          e.severity >= 8 ? "critical" :
-                          e.severity >= 5 ? "medium" :
-                          e.severity > 0 ? "low" : "clean"
-                        }`} style={{ marginLeft: 8 }}>
+                        <span className={`badge ${severityClass(e.severity)}`} style={{ marginLeft: 8 }}>
                           Sev {e.severity}
                         </span>
                       </div>

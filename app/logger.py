@@ -7,7 +7,7 @@ Uses the unified db.py module for all database operations.
 
 import os
 import datetime
-from db import DB_FILE, LOG_FILE, compute_sha256, get_connection, _db_lock, init_db
+from db import LOG_FILE, compute_sha256, get_connection, _db_lock, init_db
 
 # Ensure DB tables exist on import
 init_db()
@@ -41,7 +41,7 @@ def log_event(event_type, file_path, info):
 
     # --- Text log entry ---
     try:
-        with open(LOG_FILE, "a") as f:
+        with open(LOG_FILE, "a", encoding="utf-8") as f:
             f.write(
                 f"[{ts}] {event_type}: {file_path} "
                 f"(size={file_size}, sha256={sha256}) "

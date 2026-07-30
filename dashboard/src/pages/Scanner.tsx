@@ -1,6 +1,9 @@
-import { useState } from "react";
-import { Search, FolderSearch, ShieldAlert, ShieldCheck, Loader } from "lucide-react";
+import { useEffect, useState } from "react";
+import {
+  Search, FolderSearch, ShieldAlert, ShieldCheck, Loader, HardDrive, RefreshCw,
+} from "lucide-react";
 import { api, ScanResult } from "../api";
+import { basename, normalizePath, severityClass } from "../utils";
 
 export default function Scanner() {
   const [path, setPath] = useState("");
@@ -9,10 +12,29 @@ export default function Scanner() {
   const [result, setResult] = useState<ScanResult | null>(null);
   const [error, setError] = useState("");
   const [successMsg, setSuccessMsg] = useState("");
+  const [mounts, setMounts] = useState<string[]>([]);
 
-  // Normalize paths: strip shell backslash-escapes and trailing slashes
-  // e.g. "/Volumes/KALI\ LINUX/" → "/Volumes/KALI LINUX"
-  const normalizePath = (p: string) => p.replace(/\\ /g, " ").replace(/[\/\\]+$/, "");
+  // Offer detected removable drives instead of making the user work out the
+  // mount path by hand — which on Windows meant typing "D:", a drive-relative
+  // spec that does not mean the drive root.
+  useEffect(() => {
+    loadMounts();
+    const interval = setInterval(loadMounts, 5000);
+    return () => clearInterval(interval);
+  }, []);
+
+  async function loadMounts() {
+    try {
+      const data = await api.mounts();
+      setMounts(data.mounts);
+      // Preselect the only drive present, but never overwrite user input.
+      setPath((current) =>
+        !current && data.mounts.length === 1 ? data.mounts[0] : current
+      );
+    } catch {
+      setMounts([]);
+    }
+  }
 
   async function runScan() {
     const normalized = normalizePath(path);
@@ -51,6 +73,7 @@ export default function Scanner() {
 
   const total = result ? result.summary.detected + result.summary.clean : 0;
   const pct = total > 0 ? Math.round((result!.summary.clean / total) * 100) : 0;
+  const quarantined = result?.summary.quarantined ?? 0;
 
   return (
     <>
@@ -99,6 +122,36 @@ export default function Scanner() {
             </div>
           </div>
 
+          {/* Detected removable drives */}
+          <div className="flex items-center gap-8" style={{ marginTop: 12, flexWrap: "wrap" }}>
+            <span className="text-sm text-muted" style={{ display: "inline-flex", alignItems: "center", gap: 6 }}>
+              <HardDrive size={14} /> Detected drives:
+            </span>
+            {mounts.length === 0 ? (
+              <span className="text-sm text-muted">none — plug in a USB drive or type a path above</span>
+            ) : (
+              mounts.map((m) => (
+                <button
+                  key={m}
+                  className="btn btn-ghost btn-sm"
+                  onClick={() => setPath(m)}
+                  disabled={scanning || arming}
+                  title={m}
+                >
+                  {basename(m)}
+                </button>
+              ))
+            )}
+            <button
+              className="btn btn-ghost btn-sm"
+              onClick={loadMounts}
+              disabled={scanning || arming}
+              title="Re-scan for removable drives"
+            >
+              <RefreshCw size={13} />
+            </button>
+          </div>
+
           {scanning && (
             <div className="scan-progress-bar">
               <div className="scan-progress-fill" style={{ width: "100%", animation: "pulse-dot 1.5s ease-in-out infinite" }} />
@@ -143,6 +196,13 @@ export default function Scanner() {
                   <span>Threats Detected</span>
                 </div>
               </div>
+              <div className="stat-card amber">
+                <div className="stat-icon amber"><ShieldCheck size={22} /></div>
+                <div className="stat-info">
+                  <h3>{quarantined}</h3>
+                  <span>Quarantined</span>
+                </div>
+              </div>
               <div className="stat-card emerald">
                 <div className="stat-icon emerald"><ShieldCheck size={22} /></div>
                 <div className="stat-info">
@@ -174,15 +234,11 @@ export default function Scanner() {
                     {result.details.map((d, i) => (
                       <tr key={i}>
                         <td className="text-mono text-sm">{d.timestamp}</td>
-                        <td title={d.file_path}>{d.file_path.split("/").pop()}</td>
+                        <td title={d.file_path}>{basename(d.file_path)}</td>
                         <td>{d.tag}</td>
                         <td>{d.category}</td>
                         <td>
-                          <span className={`badge ${
-                            d.severity >= 8 ? "critical" :
-                            d.severity >= 5 ? "medium" :
-                            d.severity > 0 ? "low" : "clean"
-                          }`}>
+                          <span className={`badge ${severityClass(d.severity)}`}>
                             {d.severity}
                           </span>
                         </td>

@@ -62,6 +62,12 @@ THREAT_INTEL = {
         "action": "Inspect for shell/object creation payloads",
         "description": "VBScript/JScript file uses WScript.Shell or CreateObject — common in dropper malware."
     },
+    "Suspicious_Shell_Script": {
+        "severity": 7,
+        "category": "Code Execution",
+        "action": "Review script for remote download or reverse-shell payloads",
+        "description": "Shell script contains download-and-execute or reverse-shell patterns (curl|sh, /dev/tcp)."
+    },
 
     # --- Clean ---
     "Clean": {

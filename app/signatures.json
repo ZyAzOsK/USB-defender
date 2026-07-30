@@ -5,74 +5,139 @@
     "rules": [
         {
             "name": "Suspicious_HTML_Executable",
+            "extensions": [
+                ".html",
+                ".htm",
+                ".hta"
+            ],
+            "strong_patterns": [
+                "<script>powershell",
+                "<script>cmd.exe",
+                "<script>bitsadmin",
+                "wscript.shell",
+                "activexobject",
+                "eval(atob(",
+                "document.write(unescape("
+            ],
             "patterns": [
                 "<script>",
                 "powershell",
                 "cmd.exe",
                 "base64,"
-            ],
-            "extensions": [
-                ".html",
-                ".htm",
-                ".txt"
             ]
         },
         {
             "name": "Potential_Malicious_Python",
-            "patterns": [
-                "import os",
-                "exec(",
-                "subprocess",
-                "socket"
-            ],
             "extensions": [
-                ".py"
+                ".py",
+                ".pyw"
+            ],
+            "strong_patterns": [
+                "pty.spawn",
+                "eval(compile(",
+                "__import__('os')"
+            ],
+            "patterns": [
+                "exec(",
+                "eval(",
+                "subprocess",
+                "socket.socket",
+                "os.system",
+                "base64.b64decode"
             ]
         },
         {
             "name": "Suspicious_Batch_Script",
+            "extensions": [
+                ".bat",
+                ".cmd"
+            ],
+            "strong_patterns": [
+                "vssadmin delete shadows",
+                "bcdedit /set",
+                "format c:"
+            ],
+            "regex_patterns": [
+                "del\\s+(?:/[a-z]\\s+)*[a-z]:\\\\",
+                "rmdir\\s+/s",
+                "format\\s+[a-z]:",
+                "reg\\s+delete\\s+hk"
+            ],
             "patterns": [
                 "del /f",
                 "del /s",
                 "del /q",
-                "c:\\windows",
                 "format ",
                 "net user",
                 "reg add",
                 "reg delete",
-                "taskkill"
-            ],
-            "extensions": [
-                ".bat",
-                ".cmd"
+                "taskkill",
+                "attrib +h"
             ]
         },
         {
             "name": "Suspicious_PowerShell_Script",
-            "patterns": [
+            "extensions": [
+                ".ps1",
+                ".psm1"
+            ],
+            "strong_patterns": [
                 "invoke-webrequest",
-                "iex",
                 "downloadstring",
                 "-encodedcommand",
+                "frombase64string",
                 "invoke-expression",
-                "new-object net.webclient"
+                "new-object net.webclient",
+                "-executionpolicy bypass"
             ],
-            "extensions": [
-                ".ps1"
+            "patterns": [
+                "iex",
+                "-windowstyle hidden",
+                "start-process",
+                "net.webclient"
             ]
         },
         {
             "name": "Suspicious_VBS_Script",
-            "patterns": [
-                "wscript.shell",
-                "createobject",
-                "activexobject",
-                "shell.application"
-            ],
             "extensions": [
                 ".vbs",
+                ".vbe",
                 ".js",
+                ".jse",
                 ".wsf"
+            ],
+            "strong_patterns": [
+                "wscript.shell",
+                "adodb.stream",
+                "activexobject"
+            ],
+            "patterns": [
+                "createobject",
+                "shell.application",
+                ".run "
+            ]
+        },
+        {
+            "name": "Suspicious_Shell_Script",
+            "extensions": [
+                ".sh",
+                ".bash",
+                ".zsh"
+            ],
+            "strong_patterns": [
+                "/dev/tcp/"
+            ],
+            "regex_patterns": [
+                "(?:curl|wget)\\b[^|\\n]*\\|\\s*(?:sudo\\s+)?(?:ba|z|d)?sh\\b"
+            ],
+            "patterns": [
+                "curl ",
+                "wget ",
+                "| sh",
+                "| bash",
+                "chmod +x",
+                "nohup ",
+                "base64 -d"
             ]
         }
     ]

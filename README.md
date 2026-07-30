@@ -53,10 +53,28 @@ graph TD
 Download the installer for your platform from the **[Releases](../../releases)** page.
 
 * **Windows:** Download and run the `.msi` installer.
-* **Linux:** Download the `.deb` or `.rpm` package and install via your package manager.
-* **macOS:** Download the `.dmg` (coming soon).
+* **Linux:** Download the `.deb`, `.rpm`, or `.AppImage`.
+* **macOS:** Download the `.dmg` — `aarch64` for Apple Silicon, `x86_64` for Intel.
 
 Once installed, simply open USB Defender and plug in a USB drive!
+
+> **Unsigned builds:** the installers are not code-signed, so Windows
+> SmartScreen shows "unrecognised app" (More info → Run anyway) and macOS
+> Gatekeeper blocks first launch (right-click → Open, or
+> `xattr -d com.apple.quarantine "/Applications/USB Defender.app"`).
+
+### Where your data lives
+
+Logs, the SQLite database, your quarantine records and your edited signature
+rules are stored per-user, outside the application bundle:
+
+| Platform | Location |
+|---|---|
+| Linux   | `~/.local/share/usb-defender` (or `$XDG_DATA_HOME/usb-defender`) |
+| Windows | `%APPDATA%\USB Defender` |
+| macOS   | `~/Library/Application Support/USB Defender` |
+
+Set `USB_DEFENDER_DATA_DIR` to override.
 
 ### Option 2: The Portable Scanner
 If you just want to protect a specific USB drive:
@@ -90,17 +108,36 @@ source .venv/bin/activate  # On Windows: .venv\Scripts\activate
 pip install -r requirements.txt
 ```
 
-**3. Run the Desktop App (Development Mode):**
+**3. Build the sidecar binaries** (required — `tauri.conf.json` declares both
+in `externalBin`, so the Tauri build fails without them):
+```bash
+./scripts/build_sidecar.sh        # Linux / macOS
+scripts\build_sidecar.bat         # Windows
+```
+This produces `usb-defender-api` and `usb-defender-portable`, appends the host
+target triple, then smoke-tests the API sidecar — verifying it serves
+`/api/status`, completes a WebSocket upgrade on `/ws/monitor`, and resolves its
+data directory outside the PyInstaller temp dir.
+
+**4. Run the Desktop App (Development Mode):**
 ```bash
 cd dashboard
 npm install
 npm run tauri dev
 ```
 
-**4. Build the Portable Scanner binaries:**
+**5. Run the tests:**
 ```bash
-python portable/build_portable.py
+python -m pytest app/tests -v
+python scripts/bump_version.py --check   # all version strings agree
 ```
+
+**Cutting a release:**
+```bash
+python scripts/bump_version.py 1.0.4     # updates all 5 version declarations
+git commit -am "release: v1.0.4" && git tag v1.0.4 && git push --tags
+```
+CI refuses to publish if the tag and `tauri.conf.json` disagree.
 
 ---
 

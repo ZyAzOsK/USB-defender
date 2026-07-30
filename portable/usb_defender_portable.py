@@ -18,10 +18,10 @@ Works with Python 3.8+ (ships with every modern OS).
 """
 
 import os
+import re
 import sys
 import json
 import hashlib
-import shutil
 import uuid
 import time
 import platform
@@ -33,13 +33,21 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 # ======================================================================
 # CONFIGURATION
 # ======================================================================
-VERSION = "1.1.0"
+VERSION = "1.0.3"                        # Matches the desktop app release
 MAX_HEURISTIC_SIZE = 5 * 1024 * 1024   # 5 MB — skip content scan for larger files
 MAX_HASH_SIZE = 100 * 1024 * 1024       # 100 MB — skip SHA256 for files larger than this
 MAX_WORKERS = 8                          # Parallel scan threads
 QUARANTINE_SEVERITY_THRESHOLD = 8        # Auto-quarantine at this severity or above
-MIN_PATTERN_MATCHES = 2                  # Require 2+ pattern matches for heuristic flags
+MIN_PATTERN_MATCHES = 2                  # Require 2+ weak pattern matches to flag
+MAX_QUARANTINE_SIZE = 256 * 1024 * 1024  # Refuse to buffer anything larger
 SELF_FILENAME = "usb_defender_portable.py"  # Skip scanning ourselves
+
+# Names this scanner ships under, so it never quarantines itself.
+SELF_BINARIES = {
+    "usb_defender_portable.py", "usb-defender-portable", "usb-defender-portable.exe",
+    "usb-defender-linux", "usb-defender-macos", "USBDefender.exe", "usb-defender.exe",
+    "scan.sh", "scan.bat", "usb_defender_report.json",
+}
 
 # Directories to skip entirely (dev/system dirs — not user threat vectors)
 SKIP_DIRS = {
@@ -69,33 +77,57 @@ KNOWN_BAD_HASHES = {
     "44d88612fea8a8f36de82e1278abb02f": "EICAR_MD5",
 }
 
+# Confidence tiers, kept identical to app/signatures.py:
+#   strong_patterns / regex_patterns → conclusive on a single hit
+#   patterns                         → weak, need MIN_PATTERN_MATCHES hits
+# A flat keyword list flagged (and quarantined) every .py containing
+# "import os" and every .txt mentioning "powershell".
 HEURISTIC_RULES = [
     {
         "name": "Suspicious_HTML_Executable",
+        "extensions": [".html", ".htm", ".hta"],
+        "strong_patterns": ["<script>powershell", "<script>cmd.exe", "<script>bitsadmin",
+                            "wscript.shell", "activexobject", "eval(atob(",
+                            "document.write(unescape("],
         "patterns": ["<script>", "powershell", "cmd.exe", "base64,"],
-        "extensions": [".html", ".htm", ".txt"],
     },
     {
         "name": "Potential_Malicious_Python",
-        "patterns": ["import os", "exec(", "subprocess", "socket"],
-        "extensions": [".py"],
+        "extensions": [".py", ".pyw"],
+        "strong_patterns": ["pty.spawn", "eval(compile(", "__import__('os')"],
+        "patterns": ["exec(", "eval(", "subprocess", "socket.socket",
+                     "os.system", "base64.b64decode"],
     },
     {
         "name": "Suspicious_Batch_Script",
-        "patterns": ["del /f", "del /s", "del /q", "c:\\windows", "format ",
-                     "net user", "reg add", "reg delete", "taskkill"],
         "extensions": [".bat", ".cmd"],
+        "strong_patterns": ["vssadmin delete shadows", "bcdedit /set", "format c:"],
+        "regex_patterns": [r"del\s+(?:/[a-z]\s+)*[a-z]:\\", r"rmdir\s+/s",
+                           r"format\s+[a-z]:", r"reg\s+delete\s+hk"],
+        "patterns": ["del /f", "del /s", "del /q", "format ", "net user",
+                     "reg add", "reg delete", "taskkill", "attrib +h"],
     },
     {
         "name": "Suspicious_PowerShell_Script",
-        "patterns": ["invoke-webrequest", "iex", "downloadstring",
-                     "-encodedcommand", "invoke-expression", "new-object net.webclient"],
-        "extensions": [".ps1"],
+        "extensions": [".ps1", ".psm1"],
+        "strong_patterns": ["invoke-webrequest", "downloadstring", "-encodedcommand",
+                            "frombase64string", "invoke-expression",
+                            "new-object net.webclient", "-executionpolicy bypass"],
+        "patterns": ["iex", "-windowstyle hidden", "start-process", "net.webclient"],
     },
     {
         "name": "Suspicious_VBS_Script",
-        "patterns": ["wscript.shell", "createobject", "activexobject", "shell.application"],
-        "extensions": [".vbs", ".js", ".wsf"],
+        "extensions": [".vbs", ".vbe", ".js", ".jse", ".wsf"],
+        "strong_patterns": ["wscript.shell", "adodb.stream", "activexobject"],
+        "patterns": ["createobject", "shell.application", ".run "],
+    },
+    {
+        "name": "Suspicious_Shell_Script",
+        "extensions": [".sh", ".bash", ".zsh"],
+        "strong_patterns": ["/dev/tcp/"],
+        "regex_patterns": [r"(?:curl|wget)\b[^|\n]*\|\s*(?:sudo\s+)?(?:ba|z|d)?sh\b"],
+        "patterns": ["curl ", "wget ", "| sh", "| bash", "chmod +x",
+                     "nohup ", "base64 -d"],
     },
 ]
 
@@ -111,6 +143,7 @@ THREAT_INTEL = {
     "Suspicious_Batch_Script":   {"severity": 8,  "category": "System Manipulation",     "action": "Inspect batch file"},
     "Suspicious_PowerShell_Script":{"severity": 9,"category": "Remote Code Execution",   "action": "Quarantine and review"},
     "Suspicious_VBS_Script":     {"severity": 8,  "category": "Script Injection",        "action": "Inspect for shell payloads"},
+    "Suspicious_Shell_Script":   {"severity": 7,  "category": "Code Execution",          "action": "Review script"},
     "Clean":                     {"severity": 0,  "category": "Benign",                  "action": "No action needed"},
 }
 
@@ -186,6 +219,69 @@ def get_usb_root():
             prev_dev = parent_dev
 
 
+def is_unsafe_root(path):
+    """
+    Return a refusal reason if `path` is a system or home location rather
+    than a removable drive.
+
+    ``get_usb_root()`` walks up mount boundaries from the executable. Run the
+    scanner from ~/Downloads on a single-partition machine and that walk ends
+    at ``/`` — so an unguarded auto-detect would recursively scan and
+    quarantine the entire filesystem. Only ever a problem when the target was
+    inferred; an explicit --path is the user's call.
+    """
+    try:
+        target = Path(path).resolve()
+    except (OSError, ValueError):
+        return f"could not resolve {path}"
+
+    protected = {Path(os.sep).resolve()}
+    try:
+        home = Path.home().resolve()
+        protected.add(home)
+        for child in ("Documents", "Desktop", "Downloads", "Pictures", "Music", "Videos"):
+            protected.add(home / child)
+    except (RuntimeError, OSError):
+        pass
+
+    system = platform.system()
+    if system == "Windows":
+        for env in ("SystemRoot", "ProgramFiles", "ProgramFiles(x86)", "USERPROFILE"):
+            value = os.environ.get(env)
+            if value:
+                try:
+                    protected.add(Path(value).resolve())
+                except OSError:
+                    pass
+    else:
+        # Shared POSIX system dirs — macOS has /usr, /etc and /var too.
+        protected.update({Path("/usr"), Path("/etc"), Path("/var"), Path("/opt"),
+                          Path("/bin"), Path("/sbin"), Path("/lib"), Path("/tmp")})
+        if system == "Darwin":
+            protected.update({Path("/System"), Path("/Library"),
+                              Path("/Applications"), Path("/Users"),
+                              Path("/Volumes"), Path("/private")})
+        else:
+            protected.update({Path("/home"), Path("/boot"), Path("/srv"),
+                              Path("/proc"), Path("/sys"), Path("/dev"),
+                              Path("/run"), Path("/mnt"),
+                              # Auto-mount containers hold every attached drive
+                              Path("/media"), Path("/run/media")})
+            user = os.environ.get("USER") or os.environ.get("LOGNAME")
+            if user:
+                protected.add(Path("/media") / user)
+                protected.add(Path("/run/media") / user)
+
+    for candidate in protected:
+        try:
+            if target == candidate.resolve():
+                return f"{target} is a system/home location, not a removable drive"
+        except OSError:
+            continue
+
+    return None
+
+
 def format_size(size_bytes):
     """Human-readable file size."""
     if size_bytes < 1024:
@@ -200,6 +296,38 @@ def format_size(size_bytes):
 # ======================================================================
 # SIGNATURE MATCHING ENGINE
 # ======================================================================
+_regex_cache = {}
+
+
+def _compiled(pattern):
+    """Compile and memoize a rule regex; a bad pattern is ignored, not fatal."""
+    if pattern not in _regex_cache:
+        try:
+            _regex_cache[pattern] = re.compile(pattern, re.IGNORECASE)
+        except re.error:
+            _regex_cache[pattern] = None
+    return _regex_cache[pattern]
+
+
+def rule_matches(rule, content):
+    """Apply one rule's confidence tiers to already-lowercased content."""
+    for pattern in rule.get("strong_patterns", []):
+        if pattern.lower() in content:
+            return True
+
+    for pattern in rule.get("regex_patterns", []):
+        compiled = _compiled(pattern)
+        if compiled is not None and compiled.search(content):
+            return True
+
+    patterns = rule.get("patterns", [])
+    if not patterns:
+        return False
+
+    matched = sum(1 for p in patterns if p.lower() in content)
+    return matched >= min(MIN_PATTERN_MATCHES, len(patterns))
+
+
 def match_file(file_path):
     """
     Scan a file against all embedded signatures and heuristic rules.
@@ -209,8 +337,8 @@ def match_file(file_path):
     ext = Path(file_path).suffix.lower()
     basename = Path(file_path).name
 
-    # Skip the scanner's own file
-    if basename == SELF_FILENAME:
+    # Never flag the scanner or its own output
+    if basename in SELF_BINARIES:
         return False, []
 
     # Skip known-safe large binary extensions entirely
@@ -231,16 +359,13 @@ def match_file(file_path):
     # 2. Heuristic content scanning (with OOM protection)
     if 0 < file_size <= MAX_HEURISTIC_SIZE:
         try:
-            with open(file_path, "r", errors="ignore") as f:
+            with open(file_path, "r", encoding="utf-8", errors="ignore") as f:
                 content = f.read().lower()
 
             for rule in HEURISTIC_RULES:
-                if ext in rule["extensions"]:
-                    # Count how many patterns match — require MIN_PATTERN_MATCHES
-                    matched = sum(1 for p in rule["patterns"] if p.lower() in content)
-                    if matched >= MIN_PATTERN_MATCHES:
-                        if rule["name"] not in tags:
-                            tags.append(rule["name"])
+                if ext in rule["extensions"] and rule_matches(rule, content):
+                    if rule["name"] not in tags:
+                        tags.append(rule["name"])
         except Exception:
             pass
 
@@ -272,6 +397,11 @@ def xor_encrypt(data, key):
 def quarantine_file(file_path, info, quarantine_dir):
     """Move and XOR-encrypt a malicious file into quarantine."""
     try:
+        # XOR runs over a bytes object held entirely in memory, so a huge
+        # file would exhaust RAM on the untrusted machine we are running on.
+        if os.path.getsize(file_path) > MAX_QUARANTINE_SIZE:
+            return False, "file too large to quarantine safely"
+
         os.makedirs(quarantine_dir, exist_ok=True)
 
         quarantine_id = str(uuid.uuid4())
@@ -304,7 +434,7 @@ def quarantine_file(file_path, info, quarantine_dir):
             "scanner": "USB Defender Portable",
             "version": VERSION,
         }
-        with open(metadata_file, "w") as f:
+        with open(metadata_file, "w", encoding="utf-8") as f:
             json.dump(metadata, f, indent=4)
 
         return True, quarantine_path
@@ -387,7 +517,7 @@ def generate_report(results, target_path, scan_time, report_path):
     }
 
     try:
-        with open(report_path, "w") as f:
+        with open(report_path, "w", encoding="utf-8") as f:
             json.dump(report, f, indent=4)
         return True
     except Exception:
@@ -477,7 +607,6 @@ def run_scan(target_path, do_quarantine=True, ai_key=None):
             completed += 1
             print_progress(completed, total)
 
-    heuristic_time = time.time() - start_time
     print()  # Newline after progress bar
 
     # --- Phase 2: AI analysis (sequential, respects rate limits) ---
@@ -511,7 +640,10 @@ def run_scan(target_path, do_quarantine=True, ai_key=None):
             max_severity = max(info["severity"] for info in r["infos"])
             fp = r["file_path"]
             if max_severity >= QUARANTINE_SEVERITY_THRESHOLD and os.path.exists(fp):
-                success, _ = quarantine_file(fp, r["infos"][0], quarantine_dir)
+                # Record the highest-severity finding, not whichever rule
+                # happened to match first.
+                worst = max(r["infos"], key=lambda i: i["severity"])
+                success, _ = quarantine_file(fp, worst, quarantine_dir)
                 r["quarantined"] = success
 
     scan_time = time.time() - start_time
@@ -591,7 +723,7 @@ def restore_quarantined(target_path):
     items = []
     for i, mf in enumerate(meta_files):
         try:
-            with open(mf, "r") as f:
+            with open(mf, "r", encoding="utf-8") as f:
                 meta = json.load(f)
             items.append(meta)
             orig = meta.get("original_path", "unknown")
@@ -610,9 +742,8 @@ def restore_quarantined(target_path):
 
     print(f"  {C.BOLD}Options:{C.RESET}")
     print(f"  Enter a number (1-{len(items)}) to restore that file")
-    print(f"  Enter 'all' to restore everything")
-    print(f"  Enter 'q' to quit\n")
-
+    print("  Enter 'all' to restore everything")
+    print("  Enter 'q' to quit\n")
     choice = input(f"  {C.CYAN}>{C.RESET} ").strip().lower()
 
     if choice == "q":
@@ -684,7 +815,7 @@ def gemini_analyze(file_path, tags, api_key, max_retries=3):
 
     # Read first 200 lines of the file
     try:
-        with open(file_path, "r", errors="ignore") as f:
+        with open(file_path, "r", encoding="utf-8", errors="ignore") as f:
             lines = f.readlines()[:200]
         snippet = "".join(lines)
         if len(snippet) > 4000:
@@ -694,14 +825,14 @@ def gemini_analyze(file_path, tags, api_key, max_retries=3):
 
     filename = Path(file_path).name
     prompt = (
-        f"You are a cybersecurity analyst. A USB security scanner flagged this file.\n"
+        "You are a cybersecurity analyst. A USB security scanner flagged this file.\n"
         f"File: {filename}\n"
         f"Heuristic tags: {', '.join(tags)}\n"
         f"File content (first 200 lines):\n```\n{snippet}\n```\n\n"
-        f"Is this file actually malicious or is it a false positive?\n"
-        f"Keep the reason VERY short, under 20 words max.\n"
-        f"Respond with JSON only: "
-        f'{{"is_threat": true, "confidence": "high", "reason": "explanation"}}'
+        "Is this file actually malicious or is it a false positive?\n"
+        "Keep the reason VERY short, under 20 words max.\n"
+        "Respond with JSON only: "
+        '{"is_threat": true, "confidence": "high", "reason": "explanation"}'
     )
 
     payload = json.dumps({
@@ -750,7 +881,7 @@ def gemini_analyze(file_path, tags, api_key, max_retries=3):
                 time.sleep((attempt + 1) * 5)
                 continue
             return True, f"API error (HTTP {e.code})", "low"
-        except Exception as e:
+        except Exception:
             time.sleep((attempt + 1) * 2)
 
     return True, "AI analysis failed after retries", "low"
@@ -812,6 +943,16 @@ def main():
         target = Path(args.path).resolve()
     else:
         target = get_usb_root()
+        # Auto-detection can land on '/' when the scanner is run from a normal
+        # disk instead of a USB drive. Scanning that would quarantine files
+        # across the whole system, so refuse and make the user be explicit.
+        unsafe = is_unsafe_root(target)
+        if unsafe:
+            print(f"\n  {C.RED}ERROR: Refusing to auto-scan — {unsafe}.{C.RESET}")
+            print(f"  {C.YELLOW}This scanner is meant to run from the USB drive it protects.{C.RESET}")
+            print(f"  {C.DIM}Copy it to the drive root, or scan a specific folder:{C.RESET}")
+            print(f"  {C.DIM}    {Path(sys.argv[0]).name} --path /path/to/drive{C.RESET}\n")
+            sys.exit(2)
 
     if not target.exists():
         print(f"\n  {C.RED}ERROR: Target path does not exist: {target}{C.RESET}")
@@ -851,7 +992,7 @@ def main():
             print(f"  {C.YELLOW}  Falling back to heuristic-only mode.{C.RESET}\n")
             ai_key = None
 
-    ai_label = f"AI-Verified (Gemini)" if ai_key else "Heuristic Only"
+    ai_label = "AI-Verified (Gemini)" if ai_key else "Heuristic Only"
     print(f"  {C.BOLD}Target:{C.RESET}   {target}")
     print(f"  {C.BOLD}Platform:{C.RESET} {platform.system()} {platform.release()}")
     print(f"  {C.BOLD}Mode:{C.RESET}     {'Report Only' if args.no_quarantine else 'Scan & Quarantine'}")
