@@ -32,12 +32,25 @@ import urllib.request
 from pathlib import Path
 
 
-def wait_for_health(port: int, timeout: float = 25.0) -> dict:
-    """Poll /api/status until it answers, returning the parsed payload."""
+def wait_for_health(port: int, proc, timeout: float = 25.0) -> dict:
+    """
+    Poll /api/status until it answers, returning the parsed payload.
+
+    Watches the child process too: a sidecar that crashes on startup would
+    otherwise only be reported as a connection timeout 25 seconds later,
+    hiding the fact that it died and what its exit code was.
+    """
     deadline = time.time() + timeout
     last_error = None
 
     while time.time() < deadline:
+        exit_code = proc.poll()
+        if exit_code is not None:
+            raise RuntimeError(
+                f"sidecar exited early with code {exit_code} before serving "
+                f"/api/status - see its traceback above"
+            )
+
         try:
             url = f"http://127.0.0.1:{port}/api/status"
             with urllib.request.urlopen(url, timeout=2) as resp:
@@ -98,8 +111,8 @@ def main() -> int:
 
     failures = []
     try:
-        status = wait_for_health(args.port)
-        print(f"  /api/status ok — version={status.get('version')} "
+        status = wait_for_health(args.port, proc)
+        print(f"  /api/status ok - version={status.get('version')} "
               f"platform={status.get('platform')}")
 
         # The data dir must be a real, writable location outside _MEIPASS.

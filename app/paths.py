@@ -23,6 +23,39 @@ from pathlib import Path
 
 APP_NAME = "USB Defender"
 
+
+# ==============================
+# Console output safety
+# ==============================
+def configure_stdio() -> None:
+    """
+    Force UTF-8 on stdout/stderr so writing console output can never kill
+    the process.
+
+    On Windows, Python only reaches the Unicode console API when stdout is
+    an interactive terminal. Tauri spawns the API sidecar with a *pipe*, so
+    Python falls back to the locale codec (cp1252) — and the emoji in the
+    startup banner raised UnicodeEncodeError before uvicorn ever started.
+    The sidecar died instantly and the dashboard showed "Engine Offline"
+    with no other symptom, which is close to undebuggable from the UI.
+
+    errors="replace" means an unmappable glyph prints as "?" rather than
+    terminating the program. Called on import below, so every entry point
+    in the package is covered without each having to remember.
+    """
+    for stream in (sys.stdout, sys.stderr):
+        reconfigure = getattr(stream, "reconfigure", None)
+        if reconfigure is None:
+            # A frozen windowed build can have stdout set to None.
+            continue
+        try:
+            reconfigure(encoding="utf-8", errors="replace")
+        except (ValueError, OSError):
+            pass
+
+
+configure_stdio()
+
 # ==============================
 # Writable per-user data directory
 # ==============================
