@@ -41,7 +41,7 @@ def log_event(event_type, file_path, info):
 
     # --- Text log entry ---
     try:
-        with open(LOG_FILE, "a") as f:
+        with open(LOG_FILE, "a", encoding="utf-8") as f:
             f.write(
                 f"[{ts}] {event_type}: {file_path} "
                 f"(size={file_size}, sha256={sha256}) "

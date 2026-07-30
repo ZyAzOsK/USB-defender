@@ -204,7 +204,7 @@ def ensure_signatures():
         except OSError:
             pass
 
-    with open(SIGNATURE_FILE, "w") as f:
+    with open(SIGNATURE_FILE, "w", encoding="utf-8") as f:
         json.dump(DEFAULT_SIGNATURES, f, indent=4)
 
 
@@ -215,7 +215,7 @@ def load_signatures():
 
     ensure_signatures()
     try:
-        with open(SIGNATURE_FILE, "r") as f:
+        with open(SIGNATURE_FILE, "r", encoding="utf-8") as f:
             _cached_signatures = json.load(f)
     except (OSError, json.JSONDecodeError):
         # A corrupted or hand-edited file must not take the engine down.
@@ -245,7 +245,7 @@ def save_signatures(payload: dict) -> None:
     SIGNATURE_FILE.parent.mkdir(parents=True, exist_ok=True)
     tmp = SIGNATURE_FILE.with_suffix(".json.tmp")
 
-    with open(tmp, "w") as f:
+    with open(tmp, "w", encoding="utf-8") as f:
         json.dump(payload, f, indent=4)
     os.replace(tmp, SIGNATURE_FILE)
 
@@ -336,7 +336,7 @@ def match_file(file_path: str):
     # -------------------------------
     if 0 < file_size <= MAX_HEURISTIC_SIZE:
         try:
-            with open(file_path, "r", errors="ignore") as f:
+            with open(file_path, "r", encoding="utf-8", errors="ignore") as f:
                 content = f.read().lower()
 
             for rule in sigs.get("rules", []):

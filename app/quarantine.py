@@ -65,7 +65,7 @@ def update_summary():
         "top_threats": top_threats,
     }
 
-    with open(SUMMARY_FILE, "w") as f:
+    with open(SUMMARY_FILE, "w", encoding="utf-8") as f:
         json.dump(summary, f, indent=4)
 
 
@@ -139,7 +139,7 @@ def quarantine_file(file_path, info, quarantine_dir):
             "description": info.get("description"),
         }
 
-        with open(metadata_file, "w") as f:
+        with open(metadata_file, "w", encoding="utf-8") as f:
             json.dump(metadata, f, indent=4)
 
         # --- Insert DB record (thread-safe) ---

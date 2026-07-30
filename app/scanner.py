@@ -41,7 +41,7 @@ def _resolve_quarantine_dir(target_path: str) -> str:
     try:
         os.makedirs(candidate, exist_ok=True)
         probe = os.path.join(candidate, ".write-test")
-        with open(probe, "w") as f:
+        with open(probe, "w", encoding="utf-8") as f:
             f.write("")
         os.remove(probe)
         return candidate

@@ -59,7 +59,7 @@ def restore_quarantined(entry_id):
 
         # --- Read encryption key from metadata ---
         try:
-            with open(meta_path, "r") as f:
+            with open(meta_path, "r", encoding="utf-8") as f:
                 metadata = json.load(f)
             encryption_key = metadata.get("encryption_key")
         except Exception as e:
@@ -147,7 +147,7 @@ def show_summary():
         print("⚠️ No summary file found. Quarantine something first.")
         return
 
-    with open(SUMMARY_FILE, "r") as f:
+    with open(SUMMARY_FILE, "r", encoding="utf-8") as f:
         summary = json.load(f)
 
     print("\n📊 QUARANTINE SUMMARY\n")

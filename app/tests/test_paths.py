@@ -92,10 +92,41 @@ class TestCheckScanTarget:
 
     @pytest.mark.skipif(platform.system() == "Windows",
                         reason="POSIX-specific system directories")
-    def test_rejects_system_directories(self):
-        for candidate in ("/usr", "/etc", "/var"):
-            if os.path.isdir(candidate):
-                assert check_scan_target(candidate) is not None
+    @pytest.mark.parametrize("candidate", ["/usr", "/etc", "/var", "/bin", "/tmp", "/opt"])
+    def test_rejects_posix_system_directories(self, candidate):
+        """
+        These exist on macOS as well as Linux. Listing only /System and
+        /Library for Darwin left a Mac user able to point the scanner at
+        /usr, where a match would be quarantined out of a system directory.
+        """
+        if not os.path.isdir(candidate):
+            pytest.skip(f"{candidate} not present on this host")
+        assert check_scan_target(candidate) is not None
+
+    @pytest.mark.skipif(platform.system() != "Darwin", reason="macOS-only layout")
+    @pytest.mark.parametrize("candidate", ["/System", "/Library", "/Applications", "/Users", "/Volumes"])
+    def test_rejects_macos_system_directories(self, candidate):
+        if not os.path.isdir(candidate):
+            pytest.skip(f"{candidate} not present")
+        assert check_scan_target(candidate) is not None
+
+    @pytest.mark.skipif(platform.system() != "Darwin", reason="macOS-only layout")
+    def test_still_accepts_a_mounted_volume(self, tmp_path):
+        """
+        Protecting /Volumes must not block the drives *inside* it — that is
+        where every USB stick mounts on macOS. Only the exact container
+        directory is refused.
+        """
+        assert check_scan_target("/Volumes") is not None
+        assert check_scan_target(str(tmp_path)) is None
+
+    @pytest.mark.skipif(platform.system() != "Linux", reason="Linux-only layout")
+    def test_still_accepts_a_media_mount(self, tmp_path):
+        """Same for /run/media and /media on Linux."""
+        for container in ("/run", "/mnt", "/media"):
+            if os.path.isdir(container):
+                assert check_scan_target(container) is not None
+        assert check_scan_target(str(tmp_path)) is None
 
 
 class TestDataDir:

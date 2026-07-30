@@ -253,12 +253,18 @@ def is_unsafe_root(path):
                     protected.add(Path(value).resolve())
                 except OSError:
                     pass
-    elif system == "Darwin":
-        protected.update({Path("/System"), Path("/Library"),
-                          Path("/Applications"), Path("/Users")})
     else:
-        protected.update({Path("/usr"), Path("/etc"), Path("/var"), Path("/home"),
-                          Path("/opt"), Path("/boot"), Path("/srv")})
+        # Shared POSIX system dirs — macOS has /usr, /etc and /var too.
+        protected.update({Path("/usr"), Path("/etc"), Path("/var"), Path("/opt"),
+                          Path("/bin"), Path("/sbin"), Path("/lib"), Path("/tmp")})
+        if system == "Darwin":
+            protected.update({Path("/System"), Path("/Library"),
+                              Path("/Applications"), Path("/Users"),
+                              Path("/Volumes"), Path("/private")})
+        else:
+            protected.update({Path("/home"), Path("/boot"), Path("/srv"),
+                              Path("/proc"), Path("/sys"), Path("/dev"),
+                              Path("/run"), Path("/mnt")})
 
     for candidate in protected:
         try:
@@ -347,7 +353,7 @@ def match_file(file_path):
     # 2. Heuristic content scanning (with OOM protection)
     if 0 < file_size <= MAX_HEURISTIC_SIZE:
         try:
-            with open(file_path, "r", errors="ignore") as f:
+            with open(file_path, "r", encoding="utf-8", errors="ignore") as f:
                 content = f.read().lower()
 
             for rule in HEURISTIC_RULES:
@@ -422,7 +428,7 @@ def quarantine_file(file_path, info, quarantine_dir):
             "scanner": "USB Defender Portable",
             "version": VERSION,
         }
-        with open(metadata_file, "w") as f:
+        with open(metadata_file, "w", encoding="utf-8") as f:
             json.dump(metadata, f, indent=4)
 
         return True, quarantine_path
@@ -505,7 +511,7 @@ def generate_report(results, target_path, scan_time, report_path):
     }
 
     try:
-        with open(report_path, "w") as f:
+        with open(report_path, "w", encoding="utf-8") as f:
             json.dump(report, f, indent=4)
         return True
     except Exception:
@@ -711,7 +717,7 @@ def restore_quarantined(target_path):
     items = []
     for i, mf in enumerate(meta_files):
         try:
-            with open(mf, "r") as f:
+            with open(mf, "r", encoding="utf-8") as f:
                 meta = json.load(f)
             items.append(meta)
             orig = meta.get("original_path", "unknown")
@@ -803,7 +809,7 @@ def gemini_analyze(file_path, tags, api_key, max_retries=3):
 
     # Read first 200 lines of the file
     try:
-        with open(file_path, "r", errors="ignore") as f:
+        with open(file_path, "r", encoding="utf-8", errors="ignore") as f:
             lines = f.readlines()[:200]
         snippet = "".join(lines)
         if len(snippet) > 4000:

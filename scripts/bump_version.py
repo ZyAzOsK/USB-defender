@@ -36,13 +36,13 @@ def read_versions() -> dict[str, str | None]:
     versions: dict[str, str | None] = {}
 
     try:
-        versions["tauri.conf.json"] = json.loads(TAURI_CONF.read_text())["version"]
+        versions["tauri.conf.json"] = json.loads(TAURI_CONF.read_text(encoding="utf-8"))["version"]
     except (OSError, KeyError, json.JSONDecodeError):
         versions["tauri.conf.json"] = None
 
     def first_group(path: Path, pattern: str) -> str | None:
         try:
-            match = re.search(pattern, path.read_text(), re.MULTILINE)
+            match = re.search(pattern, path.read_text(encoding="utf-8"), re.MULTILINE)
             return match.group(1) if match else None
         except OSError:
             return None
@@ -59,24 +59,24 @@ def read_versions() -> dict[str, str | None]:
 
 def substitute(path: Path, pattern: str, replacement: str) -> bool:
     """Apply a single-line regex substitution; True when the file changed."""
-    original = path.read_text()
+    original = path.read_text(encoding="utf-8")
     updated, count = re.subn(pattern, replacement, original, count=1, flags=re.MULTILINE)
     if count == 0:
         print(f"  WARNING: no match in {path.relative_to(ROOT)}")
         return False
     if updated == original:
         return False
-    path.write_text(updated)
+    path.write_text(updated, encoding="utf-8")
     return True
 
 
 def write_versions(version: str) -> None:
     print(f"Setting version to {version}")
 
-    conf = json.loads(TAURI_CONF.read_text())
+    conf = json.loads(TAURI_CONF.read_text(encoding="utf-8"))
     if conf.get("version") != version:
         conf["version"] = version
-        TAURI_CONF.write_text(json.dumps(conf, indent=2) + "\n")
+        TAURI_CONF.write_text(json.dumps(conf, indent=2) + "\n", encoding="utf-8")
         print("  updated dashboard/src-tauri/tauri.conf.json")
 
     targets = [

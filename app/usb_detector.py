@@ -70,7 +70,7 @@ def _linux_is_removable(device_path: str) -> bool:
 
     removable = Path(f"/sys/block/{devname}/removable")
     try:
-        if removable.exists() and removable.read_text().strip() == "1":
+        if removable.exists() and removable.read_text(encoding="utf-8").strip() == "1":
             return True
     except OSError:
         pass
@@ -91,7 +91,7 @@ def _linux_mounts() -> list[tuple[str, str]]:
     """Parse /proc/mounts into (device, mount_point) pairs."""
     entries = []
     try:
-        with open("/proc/mounts", "r") as f:
+        with open("/proc/mounts", "r", encoding="utf-8") as f:
             for line in f:
                 parts = line.split()
                 if len(parts) >= 2:

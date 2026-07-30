@@ -159,14 +159,27 @@ def _protected_roots() -> set:
                     roots.add(Path(candidate).resolve())
                 except OSError:
                     pass
-    elif system == "Darwin":
-        roots.update({Path("/System"), Path("/Library"), Path("/Applications"), Path("/Users")})
     else:
+        # Shared POSIX system directories. macOS has /usr, /etc, /var and
+        # friends just like Linux does, so these must be protected on both —
+        # listing only /System and /Library left a Mac user able to scan (and
+        # quarantine inside) /usr. On macOS /etc and /var are symlinks into
+        # /private, which resolve() normalizes on both sides of the compare.
         roots.update({
-            Path("/usr"), Path("/etc"), Path("/var"), Path("/boot"),
-            Path("/bin"), Path("/sbin"), Path("/lib"), Path("/opt"),
-            Path("/home"), Path("/proc"), Path("/sys"), Path("/dev"),
+            Path("/usr"), Path("/etc"), Path("/var"), Path("/opt"),
+            Path("/bin"), Path("/sbin"), Path("/lib"), Path("/tmp"),
         })
+
+        if system == "Darwin":
+            roots.update({
+                Path("/System"), Path("/Library"), Path("/Applications"),
+                Path("/Users"), Path("/Volumes"), Path("/private"), Path("/cores"),
+            })
+        else:
+            roots.update({
+                Path("/boot"), Path("/home"), Path("/proc"), Path("/sys"),
+                Path("/dev"), Path("/run"), Path("/srv"), Path("/mnt"),
+            })
 
     return roots
 
