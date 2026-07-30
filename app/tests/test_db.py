@@ -2,8 +2,7 @@
 test_db.py — Tests for the unified database module.
 """
 
-import sqlite3
-from db import init_db, compute_sha256, get_connection, DB_FILE
+from db import init_db, compute_sha256, get_connection
 
 
 class TestInitDB:

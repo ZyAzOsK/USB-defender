@@ -4,6 +4,7 @@ import {
   RefreshCw, AlertTriangle,
 } from "lucide-react";
 import { api, QuarantineItem } from "../api";
+import { basename, severityClass } from "../utils";
 
 export default function Quarantine() {
   const [items, setItems] = useState<QuarantineItem[]>([]);
@@ -116,15 +117,12 @@ export default function Quarantine() {
                       <td title={item.original_path} style={{ maxWidth: 220 }}>
                         <div className="flex items-center gap-8">
                           <ShieldAlert size={14} style={{ color: "var(--severity-critical)", flexShrink: 0 }} />
-                          {item.original_path.split("/").pop()}
+                          {basename(item.original_path)}
                         </div>
                       </td>
                       <td>{item.tag}</td>
                       <td>
-                        <span className={`badge ${
-                          item.severity >= 8 ? "critical" :
-                          item.severity >= 5 ? "medium" : "low"
-                        }`}>
+                        <span className={`badge ${severityClass(item.severity)}`}>
                           {item.severity}
                         </span>
                       </td>

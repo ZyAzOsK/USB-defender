@@ -12,15 +12,21 @@ import time
 import os
 from watchdog.observers import Observer
 from watchdog.events import FileSystemEventHandler
-from datetime import datetime
 from logger import log_event
 from detector import detect_threat
-from threat_intel import enrich_tag
 from quarantine import quarantine_file
+from signatures import should_skip_path
 
 
 # Debounce window in seconds
 DEBOUNCE_SECONDS = 0.5
+
+# Cap on the debounce tracker. A long-running monitor over a large drive
+# would otherwise retain one dict entry per file path seen, forever.
+MAX_DEBOUNCE_ENTRIES = 4096
+
+# Kept identical to scanner.QUARANTINE_SEVERITY_THRESHOLD.
+QUARANTINE_SEVERITY_THRESHOLD = 8
 
 
 class USBEventHandler(FileSystemEventHandler):
@@ -52,6 +58,14 @@ class USBEventHandler(FileSystemEventHandler):
         last = self._last_event.get(file_path, 0)
         if now - last < DEBOUNCE_SECONDS:
             return True
+
+        # Evict entries that can no longer debounce anything before growing.
+        if len(self._last_event) >= MAX_DEBOUNCE_ENTRIES:
+            cutoff = now - DEBOUNCE_SECONDS
+            self._last_event = {
+                path: ts for path, ts in self._last_event.items() if ts > cutoff
+            }
+
         self._last_event[file_path] = now
         return False
 
@@ -60,6 +74,11 @@ class USBEventHandler(FileSystemEventHandler):
 
         # Skip quarantine folder
         if self._is_in_quarantine(file_path):
+            return
+
+        # Skip developer/system noise (node_modules, .git, media files) so the
+        # live feed stays readable and matches what the scanner would report.
+        if should_skip_path(file_path):
             return
 
         # Debounce rapid duplicate events
@@ -87,11 +106,12 @@ class USBEventHandler(FileSystemEventHandler):
         # Auto-quarantine high severity threats
         has_quarantined = False
         for info in enriched_findings:
-            if info["severity"] >= 8:
+            if info["severity"] >= QUARANTINE_SEVERITY_THRESHOLD:
                 if not has_quarantined:
-                    quarantined = quarantine_file(file_path, info, self.quarantine_dir)
-                    if quarantined:
+                    quarantine_path = quarantine_file(file_path, info, self.quarantine_dir)
+                    if quarantine_path:
                         info["tag"] = info["tag"] + " (QUARANTINED)"
+                        info["quarantine_path"] = quarantine_path
                         has_quarantined = True
                     else:
                         info["tag"] = info["tag"] + " (QUARANTINE FAILED)"

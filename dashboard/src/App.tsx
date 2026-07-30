@@ -12,7 +12,8 @@ import Scanner from "./pages/Scanner";
 import Quarantine from "./pages/Quarantine";
 import Logs from "./pages/Logs";
 import WelcomeModal from "./components/WelcomeModal";
-import { api } from "./api";
+import { api, APP_VERSION } from "./api";
+import { basename } from "./utils";
 
 export default function App() {
   const [backendOnline, setBackendOnline] = useState(false);
@@ -22,8 +23,15 @@ export default function App() {
 
   useEffect(() => {
     checkBackend();
-    const interval = setInterval(checkBackend, 4000);
-    return () => clearInterval(interval);
+    const interval = setInterval(checkBackend, 8000);
+    // Re-check as soon as the window regains focus, so the slower poll never
+    // leaves a stale "Engine Offline" badge on screen.
+    const onFocus = () => checkBackend();
+    window.addEventListener("focus", onFocus);
+    return () => {
+      clearInterval(interval);
+      window.removeEventListener("focus", onFocus);
+    };
   }, []);
 
   async function checkBackend() {
@@ -67,7 +75,7 @@ export default function App() {
             </div>
             <div className="sidebar-brand">
               <h1>USB Defender</h1>
-              <span>v1.0.0</span>
+              <span>v{APP_VERSION}</span>
             </div>
           </div>
 
@@ -152,7 +160,7 @@ export default function App() {
                 style={{ marginTop: 6, fontSize: 11, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}
                 title={usbPath}
               >
-                USB: {usbPath.split("/").pop()}
+                USB: {basename(usbPath)}
               </div>
             )}
           </div>

@@ -6,15 +6,22 @@
 const API_BASE = "http://127.0.0.1:8642";
 const WS_BASE = "ws://127.0.0.1:8642";
 
+/** Displayed in the sidebar. Kept in step with tauri.conf.json + app/api.py. */
+export const APP_VERSION = "1.0.3";
+
 // ─── Types ───────────────────────────────────────────────────
 
 export interface StatusResponse {
   status: string;
+  version: string;
   timestamp: string;
   usb_detected: boolean;
   usb_path: string | null;
+  usb_mounts: string[];
   db_path: string;
+  data_dir: string;
   monitoring_active: boolean;
+  monitored_paths: string[];
   autoscan_enabled: boolean;
   autoscan_detector_running: boolean;
   platform: string;
@@ -64,7 +71,13 @@ export interface DashboardStats {
 }
 
 export interface ScanResult {
-  summary: { detected: number; clean: number };
+  summary: {
+    detected: number;
+    clean: number;
+    quarantined?: number;
+    errors?: number;
+    total?: number;
+  };
   scan_path: string;
   details: {
     timestamp: string;
@@ -91,14 +104,37 @@ export interface QuarantineSummary {
 // ─── REST helpers ────────────────────────────────────────────
 
 async function fetchJSON<T>(path: string, opts?: RequestInit): Promise<T> {
-  const res = await fetch(`${API_BASE}${path}`, {
-    ...opts,
-    headers: { "Content-Type": "application/json", ...opts?.headers },
-  });
-  if (!res.ok) {
-    const text = await res.text();
-    throw new Error(`API ${res.status}: ${text}`);
+  let res: Response;
+  try {
+    res = await fetch(`${API_BASE}${path}`, {
+      ...opts,
+      headers: { "Content-Type": "application/json", ...opts?.headers },
+    });
+  } catch {
+    // fetch only rejects on network failure, which here means the sidecar
+    // is not up. Surface that rather than a bare "Failed to fetch".
+    throw new Error(
+      "Cannot reach the USB Defender engine on 127.0.0.1:8642. It may still be starting."
+    );
   }
+
+  if (!res.ok) {
+    // FastAPI reports problems as {"detail": "..."}; showing the raw JSON
+    // envelope to the user is noise.
+    let message = `Request failed (HTTP ${res.status})`;
+    try {
+      const body = await res.json();
+      if (typeof body?.detail === "string") {
+        message = body.detail;
+      } else if (Array.isArray(body?.detail)) {
+        message = body.detail.map((d: any) => d?.msg ?? String(d)).join("; ");
+      }
+    } catch {
+      /* non-JSON body — keep the generic message */
+    }
+    throw new Error(message);
+  }
+
   return res.json();
 }
 
@@ -107,6 +143,10 @@ async function fetchJSON<T>(path: string, opts?: RequestInit): Promise<T> {
 export const api = {
   /** Health check */
   status: () => fetchJSON<StatusResponse>("/api/status"),
+
+  /** Currently mounted removable volumes, for the drive picker */
+  mounts: () =>
+    fetchJSON<{ platform: string; mounts: string[] }>("/api/mounts"),
 
   /** Dashboard aggregate stats */
   stats: () => fetchJSON<DashboardStats>("/api/stats"),
@@ -179,7 +219,7 @@ export const api = {
 
   /** Deploy portable scanner to USB */
   armUsb: (usbPath: string) =>
-    fetchJSON<{ status: string; message: string }>("/api/arm-usb", {
+    fetchJSON<{ status: string; message: string; deployed?: string[] }>("/api/arm-usb", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ usb_path: usbPath })
@@ -208,6 +248,10 @@ export function connectMonitorWS(
         onStatus(data.message);
       } else if (data.type === "event") {
         onEvent(data.data);
+      } else if (data.type === "error" || data.error) {
+        // The server refuses unsafe or nonexistent paths; report the reason
+        // instead of leaving the UI stuck on "Connected".
+        onError(data.error || "Monitoring could not start");
       }
     } catch {
       onError("Failed to parse WebSocket message");

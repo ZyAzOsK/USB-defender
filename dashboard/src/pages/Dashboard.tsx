@@ -8,16 +8,10 @@ import {
   AlertTriangle, FileWarning,
 } from "lucide-react";
 import { api, DashboardStats } from "../api";
+import { basename, severityClass } from "../utils";
 
 const SEVERITY_COLORS = ["#ef4444", "#f59e0b", "#3b82f6"];
 const PIE_COLORS = ["#ef4444", "#f59e0b", "#3b82f6", "#10b981", "#8b5cf6"];
-
-function getSeverityClass(sev: number) {
-  if (sev >= 8) return "critical";
-  if (sev >= 5) return "medium";
-  if (sev > 0) return "low";
-  return "clean";
-}
 
 export default function Dashboard() {
   const [stats, setStats] = useState<DashboardStats | null>(null);
@@ -26,7 +20,7 @@ export default function Dashboard() {
 
   useEffect(() => {
     loadStats();
-    const interval = setInterval(loadStats, 5000);
+    const interval = setInterval(loadStats, 6000);
     return () => clearInterval(interval);
   }, []);
 
@@ -236,11 +230,11 @@ export default function Dashboard() {
                     <td className="text-mono text-sm">{a.timestamp}</td>
                     <td>{a.event_type}</td>
                     <td style={{ maxWidth: 200 }} title={a.file_path}>
-                      {a.file_path.split("/").pop()}
+                      {basename(a.file_path)}
                     </td>
                     <td>{a.tag}</td>
                     <td>
-                      <span className={`badge ${getSeverityClass(a.severity)}`}>
+                      <span className={`badge ${severityClass(a.severity)}`}>
                         {a.severity}
                       </span>
                     </td>

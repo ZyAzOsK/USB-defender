@@ -7,14 +7,18 @@ Files are encrypted with Fernet before storage to neutralize payloads.
 import os
 import uuid
 import json
-import sqlite3
-from pathlib import Path
 from datetime import datetime, timedelta
 from cryptography.fernet import Fernet
 
-from db import DB_FILE, get_connection, _db_lock
+from db import get_connection, _db_lock
+from paths import get_data_dir
 
-SUMMARY_FILE = Path(__file__).resolve().parent / "quarantine_summary.json"
+SUMMARY_FILE = get_data_dir() / "quarantine_summary.json"
+
+# Fernet has no streaming API — encrypting requires the whole payload in
+# memory, and the ciphertext roughly doubles it. Refuse oversized files
+# rather than OOM the sidecar; they stay in place and remain flagged.
+MAX_QUARANTINE_SIZE = 256 * 1024 * 1024  # 256 MB
 
 
 def update_summary():
@@ -75,9 +79,26 @@ def quarantine_file(file_path, info, quarantine_dir):
     5. Store encryption key + metadata in .meta.json
     6. Insert DB record
     7. Update summary
+
+    Returns the path to the encrypted .qfile on success, or None on failure,
+    so callers can record where the payload actually went.
     """
 
     try:
+        try:
+            file_size = os.path.getsize(file_path)
+        except OSError as e:
+            print(f"[quarantine][ERROR] cannot stat {file_path}: {e}")
+            return None
+
+        if file_size > MAX_QUARANTINE_SIZE:
+            print(
+                f"[quarantine][SKIP] {file_path} is {file_size / (1024*1024):.0f} MB, "
+                f"above the {MAX_QUARANTINE_SIZE // (1024*1024)} MB limit — "
+                "left in place and reported only."
+            )
+            return None
+
         os.makedirs(quarantine_dir, exist_ok=True)
 
         # Unique quarantine filename
@@ -150,8 +171,8 @@ def quarantine_file(file_path, info, quarantine_dir):
         # Update summary
         update_summary()
 
-        return True
+        return quarantine_path
 
     except Exception as e:
         print(f"[quarantine][ERROR] {e}")
-        return False
+        return None

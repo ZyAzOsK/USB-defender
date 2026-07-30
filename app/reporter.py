@@ -6,11 +6,10 @@ CLI log viewer and CSV exporter.
 Reads from the unified SQLite database.
 """
 
-import sqlite3
 from tabulate import tabulate
 import argparse
 import csv
-from db import DB_FILE, get_connection, _db_lock
+from db import get_connection, _db_lock
 
 
 # -------------------------

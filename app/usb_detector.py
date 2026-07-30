@@ -1,21 +1,268 @@
 """
 usb_detector.py
 ---------------
-Cross-platform USB insertion detection.
+Cross-platform USB / removable-volume detection.
 
-- Linux:  pyudev (udev monitoring)
-- Windows: WMI Win32_VolumeChangeEvent
-- macOS:  Polling /Volumes/ for new mounts
+Two responsibilities:
 
-Fires a callback with the mount path whenever a USB drive is inserted.
+1. ``list_removable_mounts()`` — a point-in-time snapshot of mounted
+   removable volumes. This is the single implementation used by the CLI,
+   the API's ``/api/status`` and ``/api/mounts``, and the polling monitors.
+   It replaces a Linux-only mount probe that made ``usb_detected`` always
+   false on Windows and macOS.
+
+2. ``USBDetector`` — a background watcher that fires callbacks on insert
+   and removal.
+
+Detection strategy per platform:
+- Linux:   pyudev (udev netlink) when available, else mount polling
+- Windows: GetLogicalDrives + GetDriveTypeW polling (no dependencies);
+           WMI is used only if explicitly requested and importable
+- macOS:   /Volumes polling, excluding the boot volume
 """
 
 import os
-import sys
 import time
 import platform
 import threading
 from pathlib import Path
+
+POLL_INTERVAL_SECONDS = 2.0
+
+# Volumes that are mounted but are not user data drives.
+_MACOS_EXCLUDED_VOLUMES = {".timemachine", "Recovery", "Preboot", "VM", "Update"}
+
+
+# ──────────────────────────────────────────────
+# Linux helpers
+# ──────────────────────────────────────────────
+def _linux_block_device_name(device_path: str) -> str | None:
+    """
+    Map a device node to its parent block device name, resolving through
+    /sys so partition schemes are handled correctly.
+
+    A regex that strips trailing digits turns 'nvme0n1p3' into 'nvme0n1p'
+    (which does not exist) and 'mmcblk0p1' into 'mmcblk0p'. Walking /sys
+    avoids guessing.
+    """
+    name = os.path.basename(os.path.realpath(device_path))
+    if not name:
+        return None
+
+    # A partition's sysfs dir lives under its parent disk.
+    sys_block = Path("/sys/class/block") / name
+    if sys_block.exists():
+        parent = sys_block.resolve().parent
+        if (parent / "removable").exists():
+            return parent.name
+        # Already a whole disk.
+        if (sys_block / "removable").exists():
+            return name
+
+    return name
+
+
+def _linux_is_removable(device_path: str) -> bool:
+    """True when the backing block device reports removable, or sits on USB."""
+    devname = _linux_block_device_name(device_path)
+    if not devname:
+        return False
+
+    removable = Path(f"/sys/block/{devname}/removable")
+    try:
+        if removable.exists() and removable.read_text().strip() == "1":
+            return True
+    except OSError:
+        pass
+
+    # USB-attached SSDs report removable=0 but are still external. The device
+    # symlink target contains the bus path, e.g. .../usb2/2-1/2-1:1.0/...
+    try:
+        link = os.path.realpath(f"/sys/block/{devname}")
+        if "/usb" in link:
+            return True
+    except OSError:
+        pass
+
+    return False
+
+
+def _linux_mounts() -> list[tuple[str, str]]:
+    """Parse /proc/mounts into (device, mount_point) pairs."""
+    entries = []
+    try:
+        with open("/proc/mounts", "r") as f:
+            for line in f:
+                parts = line.split()
+                if len(parts) >= 2:
+                    entries.append((parts[0], _unescape_mount_path(parts[1])))
+    except OSError:
+        pass
+    return entries
+
+
+def _unescape_mount_path(path: str) -> str:
+    r"""
+    Decode the octal escapes the kernel writes into /proc/mounts
+    (space -> \040, tab -> \011).
+
+    The previous raw_unicode_escape round-trip mangled non-ASCII volume
+    labels, so a drive named 'Datos Añejos' produced an unusable path.
+    """
+    if "\\" not in path:
+        return path
+
+    out = []
+    i = 0
+    while i < len(path):
+        if path[i] == "\\" and i + 3 < len(path) + 1 and path[i + 1:i + 4].isdigit():
+            try:
+                out.append(chr(int(path[i + 1:i + 4], 8)))
+                i += 4
+                continue
+            except ValueError:
+                pass
+        out.append(path[i])
+        i += 1
+    return "".join(out)
+
+
+def _linux_removable_mounts() -> set[str]:
+    """Removable mount points on Linux."""
+    mounts = set()
+
+    for device, mount_point in _linux_mounts():
+        if not device.startswith("/dev/"):
+            continue
+        # Ignore the roots that are never removable media.
+        if mount_point in ("/", "/boot", "/boot/efi", "/home"):
+            continue
+        if _linux_is_removable(device):
+            mounts.add(mount_point)
+
+    # Also accept anything under the standard auto-mount roots, which covers
+    # filesystems whose backing device we could not classify. /mnt is
+    # deliberately excluded — network shares live there, and auto-scan must
+    # not start quarantining a fileserver.
+    user = os.environ.get("USER") or os.environ.get("LOGNAME") or ""
+    for base in (f"/run/media/{user}", f"/media/{user}", "/media"):
+        if not os.path.isdir(base):
+            continue
+        try:
+            for entry in os.listdir(base):
+                full = os.path.join(base, entry)
+                if os.path.ismount(full):
+                    mounts.add(full)
+        except (PermissionError, OSError):
+            pass
+
+    return mounts
+
+
+# ──────────────────────────────────────────────
+# Windows helpers
+# ──────────────────────────────────────────────
+DRIVE_REMOVABLE = 2
+DRIVE_CDROM = 5
+
+
+def _windows_removable_mounts() -> set[str]:
+    """
+    Removable drive roots on Windows, e.g. {'E:\\\\'}.
+
+    Uses ctypes against kernel32 so it works in a frozen build with no
+    pywin32/WMI dependency.
+    """
+    drives = set()
+    try:
+        import ctypes
+
+        kernel32 = ctypes.windll.kernel32
+        bitmask = kernel32.GetLogicalDrives()
+
+        for letter in "ABCDEFGHIJKLMNOPQRSTUVWXYZ":
+            if bitmask & 1:
+                path = f"{letter}:\\"
+                drive_type = kernel32.GetDriveTypeW(path)
+                if drive_type == DRIVE_REMOVABLE:
+                    # A card reader with no card still reports removable but
+                    # has no accessible root.
+                    if os.path.exists(path):
+                        drives.add(path)
+            bitmask >>= 1
+    except Exception:
+        pass
+    return drives
+
+
+# ──────────────────────────────────────────────
+# macOS helpers
+# ──────────────────────────────────────────────
+def _macos_removable_mounts() -> set[str]:
+    """
+    Mounted volumes under /Volumes excluding the boot volume.
+
+    Identifying the boot volume by name ('Macintosh HD') fails as soon as
+    the user renames their disk, so compare device IDs against '/' instead.
+    """
+    volumes = set()
+    volumes_dir = "/Volumes"
+
+    try:
+        root_dev = os.stat("/").st_dev
+    except OSError:
+        root_dev = None
+
+    if not os.path.isdir(volumes_dir):
+        return volumes
+
+    try:
+        entries = os.listdir(volumes_dir)
+    except (PermissionError, OSError):
+        return volumes
+
+    for entry in entries:
+        if entry in _MACOS_EXCLUDED_VOLUMES:
+            continue
+        full = os.path.join(volumes_dir, entry)
+        try:
+            if not os.path.ismount(full):
+                continue
+            # /Volumes contains a symlink back to the boot volume.
+            if root_dev is not None and os.stat(full).st_dev == root_dev:
+                continue
+        except OSError:
+            continue
+        volumes.add(full)
+
+    return volumes
+
+
+# ──────────────────────────────────────────────
+# Public snapshot API
+# ──────────────────────────────────────────────
+def list_removable_mounts() -> list[str]:
+    """
+    Return currently mounted removable volume paths, sorted for stable UI.
+    Safe to call frequently; never raises.
+    """
+    try:
+        system = platform.system()
+        if system == "Windows":
+            mounts = _windows_removable_mounts()
+        elif system == "Darwin":
+            mounts = _macos_removable_mounts()
+        else:
+            mounts = _linux_removable_mounts()
+        return sorted(mounts)
+    except Exception:
+        return []
+
+
+def find_usb_mount() -> str | None:
+    """First detected removable mount, or None. Cross-platform."""
+    mounts = list_removable_mounts()
+    return mounts[0] if mounts else None
 
 
 class USBDetector:
@@ -31,14 +278,18 @@ class USBDetector:
         detector.stop()    # graceful shutdown
     """
 
-    def __init__(self, on_insert=None, on_remove=None):
+    def __init__(self, on_insert=None, on_remove=None, use_wmi=False):
         """
         Args:
             on_insert: Callable(str) — called with mount path when USB is inserted
             on_remove: Callable(str) — called with mount path when USB is removed
+            use_wmi:   Windows only — opt in to WMI events instead of polling.
+                       Off by default because WMI needs pywin32, which does
+                       not survive PyInstaller bundling reliably.
         """
         self.on_insert = on_insert or (lambda path: None)
         self.on_remove = on_remove or (lambda path: None)
+        self.use_wmi = use_wmi
         self._stop_event = threading.Event()
         self._thread = None
         self._system = platform.system()  # "Linux", "Windows", "Darwin"
@@ -59,19 +310,53 @@ class USBDetector:
         elif self._system == "Windows":
             target = self._windows_monitor
         elif self._system == "Darwin":
-            target = self._macos_monitor
+            target = self._poll_monitor
         else:
             raise OSError(f"Unsupported platform: {self._system}")
 
-        self._thread = threading.Thread(target=target, daemon=True)
+        self._thread = threading.Thread(target=target, daemon=True,
+                                        name="usb-detector")
         self._thread.start()
 
     def stop(self):
         """Signal the monitor to stop."""
         self._stop_event.set()
         if self._thread:
-            self._thread.join(timeout=3)
+            self._thread.join(timeout=POLL_INTERVAL_SECONDS + 2)
             self._thread = None
+
+    def _safe_insert(self, path):
+        """Never let a callback exception kill the monitor thread."""
+        try:
+            self.on_insert(path)
+        except Exception as e:
+            print(f"[usb_detector] on_insert callback failed: {e}", flush=True)
+
+    def _safe_remove(self, path):
+        try:
+            self.on_remove(path)
+        except Exception as e:
+            print(f"[usb_detector] on_remove callback failed: {e}", flush=True)
+
+    # ──────────────────────────────────────────────
+    # Generic polling monitor (macOS, and fallback everywhere)
+    # ──────────────────────────────────────────────
+    def _poll_monitor(self):
+        """Diff the removable-mount snapshot on an interval."""
+        known = set(list_removable_mounts())
+
+        while not self._stop_event.is_set():
+            if self._stop_event.wait(POLL_INTERVAL_SECONDS):
+                break
+
+            current = set(list_removable_mounts())
+
+            for mount in sorted(current - known):
+                self._safe_insert(mount)
+            for mount in sorted(known - current):
+                self._safe_remove(mount)
+
+            known = current
 
     # ──────────────────────────────────────────────
     # Linux: pyudev-based udev monitoring
@@ -81,201 +366,107 @@ class USBDetector:
         try:
             import pyudev
         except ImportError:
-            print("[usb_detector] pyudev not installed, falling back to polling")
-            self._linux_poll_fallback()
+            # Expected on minimal systems — polling is fully functional.
+            print("[usb_detector] pyudev unavailable, using mount polling", flush=True)
+            self._poll_monitor()
             return
 
-        context = pyudev.Context()
-        monitor = pyudev.Monitor.from_netlink(context)
-        monitor.filter_by(subsystem='block', device_type='partition')
-
-        # Non-blocking poll loop
-        monitor.start()
+        try:
+            context = pyudev.Context()
+            monitor = pyudev.Monitor.from_netlink(context)
+            monitor.filter_by(subsystem='block', device_type='partition')
+            monitor.start()
+        except Exception as e:
+            print(f"[usb_detector] udev unavailable ({e}), using mount polling", flush=True)
+            self._poll_monitor()
+            return
 
         while not self._stop_event.is_set():
-            device = monitor.poll(timeout=1)
+            try:
+                device = monitor.poll(timeout=1)
+            except Exception:
+                continue
+
             if device is None:
                 continue
 
-            action = device.action  # 'add', 'remove', 'change'
-            dev_node = device.device_node  # e.g., /dev/sdb1
+            action = device.action          # 'add', 'remove', 'change'
+            dev_node = device.device_node   # e.g., /dev/sdb1
 
             if action == 'add':
-                # Wait for mount to appear
-                mount_path = self._wait_for_linux_mount(dev_node, timeout=8)
+                mount_path = self._wait_for_linux_mount(dev_node, timeout=10)
                 if mount_path:
-                    self.on_insert(mount_path)
+                    self._safe_insert(mount_path)
 
             elif action == 'remove':
-                # Device removed — we can report the dev_node
-                self.on_remove(dev_node or "unknown")
+                self._safe_remove(dev_node or "unknown")
 
-    def _wait_for_linux_mount(self, dev_node, timeout=8):
+    def _wait_for_linux_mount(self, dev_node, timeout=10):
         """
         After a partition 'add' event, wait for it to be mounted.
         Returns the mount path or None if it never appeared.
         """
-        start = time.time()
-        while time.time() - start < timeout:
+        deadline = time.time() + timeout
+
+        while time.time() < deadline:
             if self._stop_event.is_set():
                 return None
 
-            # Parse /proc/mounts for the device
-            try:
-                with open("/proc/mounts", "r") as f:
-                    for line in f:
-                        parts = line.split()
-                        if len(parts) >= 2 and parts[0] == dev_node:
-                            mount_path = parts[1]
-                            # Unescape octal sequences like \040 for spaces
-                            mount_path = mount_path.encode('raw_unicode_escape').decode('unicode_escape')
-                            return mount_path
-            except OSError:
-                pass
+            for device, mount_point in _linux_mounts():
+                if device == dev_node:
+                    return mount_point
 
-            time.sleep(0.5)
+            if self._stop_event.wait(0.5):
+                return None
 
         return None
 
-    def _linux_poll_fallback(self):
-        """Fallback: poll /run/media/ and /media/ for new mounts."""
-        known_mounts = self._get_linux_mounts()
-
-        while not self._stop_event.is_set():
-            time.sleep(2)
-            current = self._get_linux_mounts()
-
-            # New mounts
-            for m in current - known_mounts:
-                self.on_insert(m)
-
-            # Removed mounts
-            for m in known_mounts - current:
-                self.on_remove(m)
-
-            known_mounts = current
-
-    def _get_linux_mounts(self):
-        """Get set of current USB mount paths on Linux."""
-        mounts = set()
-        user = os.environ.get("USER", "")
-
-        search_dirs = [
-            f"/run/media/{user}",
-            f"/media/{user}",
-            "/media",
-        ]
-
-        for base in search_dirs:
-            if os.path.isdir(base):
-                try:
-                    for entry in os.listdir(base):
-                        full = os.path.join(base, entry)
-                        if os.path.ismount(full):
-                            mounts.add(full)
-                except PermissionError:
-                    pass
-
-        return mounts
-
     # ──────────────────────────────────────────────
-    # Windows: WMI volume change events
+    # Windows: drive-letter polling (WMI optional)
     # ──────────────────────────────────────────────
     def _windows_monitor(self):
-        """Monitor USB events via WMI on Windows."""
+        """
+        Monitor removable drives on Windows.
+
+        Polling is the default: it needs nothing beyond ctypes, survives
+        PyInstaller bundling, and detects the mount (not just the device
+        arrival) which is what a scan actually needs.
+        """
+        if not self.use_wmi:
+            self._poll_monitor()
+            return
+
         try:
             import wmi
         except ImportError:
-            print("[usb_detector] wmi not installed, falling back to polling")
-            self._windows_poll_fallback()
+            print("[usb_detector] wmi requested but unavailable, using polling", flush=True)
+            self._poll_monitor()
             return
 
-        c = wmi.WMI()
-
-        # Watch for volume change events
-        watcher = c.Win32_VolumeChangeEvent.watch_for(
-            EventType=2  # 2 = Device Arrival
-        )
+        try:
+            c = wmi.WMI()
+            watcher = c.Win32_VolumeChangeEvent.watch_for(EventType=2)  # arrival
+        except Exception as e:
+            print(f"[usb_detector] WMI setup failed ({e}), using polling", flush=True)
+            self._poll_monitor()
+            return
 
         while not self._stop_event.is_set():
             try:
                 event = watcher(timeout_ms=1000)
-                if event:
-                    drive = event.DriveName  # e.g., "E:"
-                    mount_path = drive + "\\"
-                    if os.path.exists(mount_path):
-                        self.on_insert(mount_path)
             except Exception:
-                # WMI timeout — normal, just keep polling
-                pass
+                continue  # WMI timeout is normal
 
-    def _windows_poll_fallback(self):
-        """Fallback: poll Windows drive letters for new removable drives."""
-        known = self._get_windows_removable_drives()
+            if not event:
+                continue
 
-        while not self._stop_event.is_set():
-            time.sleep(2)
-            current = self._get_windows_removable_drives()
+            drive = getattr(event, "DriveName", None)
+            if not drive:
+                continue
 
-            for d in current - known:
-                self.on_insert(d)
-            for d in known - current:
-                self.on_remove(d)
-
-            known = current
-
-    def _get_windows_removable_drives(self):
-        """Get set of removable drive paths on Windows."""
-        drives = set()
-        try:
-            import ctypes
-            bitmask = ctypes.windll.kernel32.GetLogicalDrives()
-            for letter in "ABCDEFGHIJKLMNOPQRSTUVWXYZ":
-                if bitmask & 1:
-                    path = f"{letter}:\\"
-                    drive_type = ctypes.windll.kernel32.GetDriveTypeW(path)
-                    if drive_type == 2:  # DRIVE_REMOVABLE
-                        drives.add(path)
-                bitmask >>= 1
-        except Exception:
-            pass
-        return drives
-
-    # ──────────────────────────────────────────────
-    # macOS: Poll /Volumes/ for new mounts
-    # ──────────────────────────────────────────────
-    def _macos_monitor(self):
-        """Monitor USB events on macOS by polling /Volumes/."""
-        known = self._get_macos_volumes()
-
-        while not self._stop_event.is_set():
-            time.sleep(2)
-            current = self._get_macos_volumes()
-
-            for v in current - known:
-                self.on_insert(v)
-            for v in known - current:
-                self.on_remove(v)
-
-            known = current
-
-    def _get_macos_volumes(self):
-        """Get set of mounted volumes on macOS (excluding system)."""
-        volumes = set()
-        volumes_dir = "/Volumes"
-
-        if os.path.isdir(volumes_dir):
-            try:
-                for entry in os.listdir(volumes_dir):
-                    full = os.path.join(volumes_dir, entry)
-                    # Skip "Macintosh HD" and similar system volumes
-                    if entry not in ("Macintosh HD", "Macintosh HD - Data"):
-                        if os.path.ismount(full):
-                            volumes.add(full)
-            except PermissionError:
-                pass
-
-        return volumes
+            mount_path = drive if drive.endswith("\\") else drive + "\\"
+            if os.path.exists(mount_path):
+                self._safe_insert(mount_path)
 
 
 # ──────────────────────────────────────────────
@@ -290,6 +481,7 @@ if __name__ == "__main__":
 
     detector = USBDetector(on_insert=on_insert, on_remove=on_remove)
     print(f"USB Detector starting on {platform.system()}...")
+    print(f"Currently mounted removable volumes: {list_removable_mounts() or 'none'}")
     print("Plug in or remove a USB drive. Press Ctrl+C to stop.\n")
     detector.start()
 

@@ -10,12 +10,16 @@ import os
 import hashlib
 import sqlite3
 import threading
-from pathlib import Path
+
+from paths import get_data_dir
 
 # ==============================
 # Paths
 # ==============================
-BASE_DIR = Path(__file__).resolve().parent
+# Writable state lives in the per-user data directory, never next to the
+# module: in a frozen sidecar that would be the _MEIPASS temp dir, which is
+# deleted on exit — taking the database and logs with it.
+BASE_DIR = get_data_dir()
 DB_FILE = BASE_DIR / "usb_defender.db"
 LOG_DIR = BASE_DIR / "logs"
 LOG_FILE = LOG_DIR / "activity.log"
@@ -34,8 +38,11 @@ def get_connection() -> sqlite3.Connection:
     and check_same_thread=False for multi-threaded safety.
     Callers are responsible for closing the connection.
     """
-    conn = sqlite3.connect(str(DB_FILE), check_same_thread=False)
+    conn = sqlite3.connect(str(DB_FILE), check_same_thread=False, timeout=15)
     conn.execute("PRAGMA journal_mode=WAL;")
+    # Scans write from a thread pool while the API reads; without this a
+    # concurrent writer raises "database is locked" instead of waiting.
+    conn.execute("PRAGMA busy_timeout=15000;")
     return conn
 
 

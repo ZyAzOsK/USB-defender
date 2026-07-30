@@ -10,35 +10,16 @@ import os
 import platform
 import argparse
 from pathlib import Path
-from db import init_db
+from db import init_db, LOG_DIR
 from scanner import scan_target
 from watcher import start_monitoring
+from paths import normalize_target_path, check_scan_target
+from usb_detector import find_usb_mount, list_removable_mounts
 
-
-def find_usb_mount():
-    """Auto-detect USB mount point on Linux, prioritizing removable drives."""
-    try:
-        username = os.getlogin()
-    except OSError:
-        username = os.environ.get("USER", "")
-
-    possible_paths = [f"/run/media/{username}", f"/media/{username}"]
-
-    # Keep track of the first mount we find, in case we can't determine removability
-    fallback_mount = None
-
-    for path in possible_paths:
-        if os.path.exists(path):
-            for device in os.listdir(path):
-                mount_path = os.path.join(path, device)
-                if os.path.ismount(mount_path):
-                    # Check if it's actually removable (e.g. skip Windows-SSD)
-                    if is_block_device_removable(mount_path):
-                        return mount_path
-                    if fallback_mount is None:
-                        fallback_mount = mount_path
-                        
-    return fallback_mount
+# find_usb_mount is re-exported from usb_detector so api.py and the CLI share
+# one cross-platform implementation. The previous local copy only searched
+# /run/media and /media, so it always returned None on Windows and macOS.
+__all__ = ["find_usb_mount", "list_removable_mounts", "main"]
 
 
 def get_mount_root_of_path(p: Path) -> Path:
@@ -76,7 +57,7 @@ def parse_args():
                     help="Path to operate on. If omitted, auto-detects USB mount.",
                     default=None)
     p.add_argument("--require-removable", action="store_true",
-                    help="Ensure target is a removable device (Linux only).")
+                    help="Ensure target is a removable device before operating on it.")
     p.add_argument("--scan", action="store_true",
                     help="Run one-time scan (non-interactive mode).")
     p.add_argument("--monitor", action="store_true",
@@ -85,25 +66,12 @@ def parse_args():
 
 
 def is_block_device_removable(mount_path: str) -> bool:
-    """Linux: check if a mount corresponds to a removable block device."""
-    try:
-        import re
-        with open("/proc/mounts", "r") as f:
-            for line in f:
-                parts = line.split()
-                if len(parts) >= 2 and parts[1] == mount_path:
-                    dev = parts[0]
-                    devname = os.path.basename(dev)
-                    devbase = re.sub(r"\d+$", "", devname)
-                    removable_path = f"/sys/block/{devbase}/removable"
-                    if os.path.exists(removable_path):
-                        with open(removable_path, "r") as r:
-                            val = r.read().strip()
-                            return val == "1"
-                    return False
-    except Exception:
-        return False
-    return False
+    """
+    Check whether a mount point corresponds to removable media.
+    Cross-platform: delegates to the shared detector rather than parsing
+    /proc/mounts with a partition-name regex that broke on NVMe and eMMC.
+    """
+    return mount_path in list_removable_mounts()
 
 
 def main():
@@ -111,28 +79,23 @@ def main():
     init_db()
 
     args = parse_args()
-    usb_mount = find_usb_mount()
-    usb_script_mount = detect_usb_root_from_script()
 
     # Decide target mount
     if args.path:
-        target = args.path
-    elif usb_mount:
-        target = usb_mount
+        target = normalize_target_path(args.path)
     else:
-        target = usb_script_mount
+        target = find_usb_mount() or detect_usb_root_from_script()
 
-    if not os.path.exists(target):
-        print(f"[ERROR] target path does not exist: {target}")
+    problem = check_scan_target(target)
+    if problem:
+        print(f"[ERROR] {problem}")
         return
 
-    if platform.system() != "Windows" and args.require_removable:
-        if not is_block_device_removable(target):
-            print("[ERROR] target is not a removable block device (or detection failed). Exiting.")
-            return
+    if args.require_removable and not is_block_device_removable(target):
+        print("[ERROR] target is not a removable device (or detection failed). Exiting.")
+        return
 
-    log_path = os.path.join(os.path.dirname(__file__), "logs")
-    os.makedirs(log_path, exist_ok=True)
+    log_path = str(LOG_DIR)
 
     # Non-interactive mode (for sidecar/API usage)
     if args.scan:

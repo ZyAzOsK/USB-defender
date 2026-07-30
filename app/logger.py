@@ -7,7 +7,7 @@ Uses the unified db.py module for all database operations.
 
 import os
 import datetime
-from db import DB_FILE, LOG_FILE, compute_sha256, get_connection, _db_lock, init_db
+from db import LOG_FILE, compute_sha256, get_connection, _db_lock, init_db
 
 # Ensure DB tables exist on import
 init_db()

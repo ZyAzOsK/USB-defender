@@ -5,11 +5,17 @@ conftest.py — pytest fixtures for USB-Defender tests.
 import os
 import sys
 import tempfile
-import shutil
 import pytest
 
 # Ensure app/ is importable
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
+
+# Redirect the writable data dir *before* any app module is imported.
+# db.py and signatures.py resolve their paths at import time, so without
+# this the suite would read and write the developer's real
+# ~/.local/share/usb-defender (or %APPDATA%) directory.
+_TEST_DATA_DIR = tempfile.mkdtemp(prefix="usb-defender-tests-")
+os.environ["USB_DEFENDER_DATA_DIR"] = _TEST_DATA_DIR
 
 
 @pytest.fixture(autouse=True)
@@ -28,12 +34,28 @@ def fresh_db(tmp_path, monkeypatch):
     monkeypatch.setattr(db_module, "LOG_DIR", test_log_dir)
     monkeypatch.setattr(db_module, "LOG_FILE", test_log_dir / "activity.log")
 
-    # Also patch logger's references
-    import logger as logger_module
-    monkeypatch.setattr(logger_module, "log_event", logger_module.log_event)
-
     db_module.init_db()
     yield tmp_path
+
+
+@pytest.fixture(autouse=True)
+def fresh_signatures(tmp_path, monkeypatch):
+    """
+    Give each test an isolated signatures.json seeded from the built-in
+    defaults, and drop the module-level cache so edits in one test cannot
+    leak into the next.
+    """
+    import json
+    import signatures as sig_module
+
+    sig_file = tmp_path / "signatures.json"
+    with open(sig_file, "w") as f:
+        json.dump(sig_module.DEFAULT_SIGNATURES, f, indent=4)
+
+    monkeypatch.setattr(sig_module, "SIGNATURE_FILE", sig_file)
+    monkeypatch.setattr(sig_module, "_cached_signatures", None)
+    yield sig_file
+    sig_module._cached_signatures = None
 
 
 @pytest.fixture
@@ -61,6 +83,20 @@ def test_usb(tmp_path):
     # Large file (> 5MB, should skip heuristic but still hash)
     large_file = usb / "large.bin"
     large_file.write_bytes(b"\x00" * (6 * 1024 * 1024))
+
+    # Benign developer files — these must NOT be flagged. Each trips exactly
+    # one weak keyword, which is the false-positive case that used to get
+    # real user files encrypted and deleted.
+    (usb / "helper.py").write_text(
+        "import os\n"
+        "import sys\n\n"
+        "def main():\n"
+        "    print(os.getcwd())\n"
+    )
+    (usb / "notes.txt").write_text(
+        "Reminder: ask IT about the powershell execution policy on the lab PCs.\n"
+    )
+    (usb / "build.bat").write_text("@echo off\nnet user\n")
 
     # Symlink
     try:

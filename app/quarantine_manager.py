@@ -6,17 +6,16 @@ CLI tool to list, restore, delete, and summarize quarantined files.
 Supports Fernet decryption on restore.
 """
 
-import sqlite3
 from tabulate import tabulate
 import argparse
 import json
 import os
-from pathlib import Path
 from cryptography.fernet import Fernet
 
-from db import DB_FILE, get_connection, _db_lock
+from db import get_connection, _db_lock
+from paths import get_data_dir
 
-SUMMARY_FILE = Path(__file__).resolve().parent / "quarantine_summary.json"
+SUMMARY_FILE = get_data_dir() / "quarantine_summary.json"
 
 
 # -----------------------------------
