@@ -16,6 +16,7 @@ from paths import (
     check_scan_target,
     get_data_dir,
     get_bundle_dir,
+    _protected_roots,
 )
 
 
@@ -110,22 +111,54 @@ class TestCheckScanTarget:
             pytest.skip(f"{candidate} not present")
         assert check_scan_target(candidate) is not None
 
-    @pytest.mark.skipif(platform.system() != "Darwin", reason="macOS-only layout")
-    def test_still_accepts_a_mounted_volume(self, tmp_path):
+    def test_mount_containers_are_protected(self):
         """
-        Protecting /Volumes must not block the drives *inside* it — that is
-        where every USB stick mounts on macOS. Only the exact container
-        directory is refused.
-        """
-        assert check_scan_target("/Volumes") is not None
-        assert check_scan_target(str(tmp_path)) is None
+        Auto-mount container directories hold *every* attached drive, so
+        scanning one recurses into all of them at once.
 
-    @pytest.mark.skipif(platform.system() != "Linux", reason="Linux-only layout")
-    def test_still_accepts_a_media_mount(self, tmp_path):
-        """Same for /run/media and /media on Linux."""
-        for container in ("/run", "/mnt", "/media"):
-            if os.path.isdir(container):
-                assert check_scan_target(container) is not None
+        Asserted against the protected set rather than the live filesystem:
+        the previous version skipped when a directory was absent, so it
+        passed on a machine without /media and only failed in CI.
+        """
+        roots = {str(p) for p in _protected_roots()}
+        system = platform.system()
+
+        if system == "Darwin":
+            expected = ["/Volumes", "/Users"]
+        elif system == "Windows":
+            pytest.skip("Windows has no mount-container directory")
+        else:
+            expected = ["/media", "/run/media", "/mnt", "/run"]
+
+        missing = [d for d in expected if d not in roots]
+        assert not missing, f"unprotected mount containers: {missing}"
+
+    def test_posix_system_dirs_protected_on_every_posix_platform(self):
+        """
+        These exist on macOS as well as Linux, so neither branch may omit
+        them — the Darwin branch originally did.
+        """
+        if platform.system() == "Windows":
+            pytest.skip("POSIX-specific")
+        roots = {str(p) for p in _protected_roots()}
+        missing = [d for d in ("/usr", "/etc", "/var", "/bin", "/opt", "/tmp")
+                   if d not in roots]
+        assert not missing, f"unprotected system directories: {missing}"
+
+    def test_drives_inside_a_container_stay_scannable(self, tmp_path):
+        """
+        Protecting the container must not block the drives beneath it —
+        that is the product's whole purpose. Only exact matches are refused.
+        """
+        for container in ("/Volumes", "/media", "/run/media"):
+            child = os.path.join(container, "MY_USB_DRIVE")
+            # Nonexistent, so the reason must be "does not exist" rather than
+            # "protected location" — proving the prefix itself is not blocked.
+            reason = check_scan_target(child) or ""
+            assert "protected" not in reason.lower(), (
+                f"{child} was refused as protected; container blocking is too broad"
+            )
+
         assert check_scan_target(str(tmp_path)) is None
 
 

@@ -264,7 +264,13 @@ def is_unsafe_root(path):
         else:
             protected.update({Path("/home"), Path("/boot"), Path("/srv"),
                               Path("/proc"), Path("/sys"), Path("/dev"),
-                              Path("/run"), Path("/mnt")})
+                              Path("/run"), Path("/mnt"),
+                              # Auto-mount containers hold every attached drive
+                              Path("/media"), Path("/run/media")})
+            user = os.environ.get("USER") or os.environ.get("LOGNAME")
+            if user:
+                protected.add(Path("/media") / user)
+                protected.add(Path("/run/media") / user)
 
     for candidate in protected:
         try:

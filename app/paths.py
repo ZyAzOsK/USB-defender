@@ -179,7 +179,17 @@ def _protected_roots() -> set:
             roots.update({
                 Path("/boot"), Path("/home"), Path("/proc"), Path("/sys"),
                 Path("/dev"), Path("/run"), Path("/srv"), Path("/mnt"),
+                # Auto-mount containers. These hold *every* attached drive, so
+                # scanning the container recurses into all of them at once —
+                # the same reason /Volumes is protected on macOS. Individual
+                # mounts beneath them stay scannable (exact match only).
+                Path("/media"), Path("/run/media"),
             })
+
+            user = os.environ.get("USER") or os.environ.get("LOGNAME")
+            if user:
+                roots.add(Path("/media") / user)
+                roots.add(Path("/run/media") / user)
 
     return roots
 
